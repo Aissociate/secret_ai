@@ -66,7 +66,9 @@ export async function advanceSeasonDay(
   reason?: string;
   next_at?: string;
 }> {
-  const { data, error } = await supabase.rpc('advance_season_day', {
+  // Enrobage admin: advance_season_day est SECURITY DEFINER et n'est pas
+  // exposee aux comptes authentifies (elle terminerait une saison en cours).
+  const { data, error } = await supabase.rpc('admin_advance_season_day', {
     p_season_id: seasonId,
     p_force: force,
   });
@@ -79,7 +81,7 @@ export async function closeSeasonNow(
   seasonId: string,
   reason = 'admin_closed'
 ): Promise<{ ok: boolean; winner_name?: string | null; prize_pool?: number }> {
-  const { data, error } = await supabase.rpc('close_season', {
+  const { data, error } = await supabase.rpc('admin_close_season', {
     p_season_id: seasonId,
     p_reason: reason,
   });
@@ -302,56 +304,66 @@ export async function fetchSuspicion(
   return { agents, matrix };
 }
 
-export async function postOwnerInfluence(
+/*
+  Les influences passent par une RPC unique.
+
+  L'insertion directe ne décrémentait jamais le quota « 2 moments par jour »,
+  n'augmentait jamais la popularité de la cible pourtant annoncée, et laissait
+  `influence_history` vide alors que le panneau propriétaire l'affiche. La
+  policy d'events permettait en outre à n'importe quel compte de poster une
+  directive « owner » sur l'agent d'un tiers.
+*/
+type InfluenceResult = {
+  ok: boolean;
+  error?: string;
+  popularity?: number;
+  remaining?: number;
+};
+
+const INFLUENCE_ERRORS: Record<string, string> = {
+  not_owner: "Vous ne pouvez influencer que votre propre agent.",
+  no_influence_left: "Vous avez utilise vos 2 moments du jour.",
+  agent_unavailable: "Cet agent n'est plus en jeu.",
+  season_not_live: "La saison n'est pas en cours.",
+  empty_message: 'Le message est vide.',
+  not_authenticated: 'Vous devez etre connecte.',
+};
+
+async function postInfluence(
+  kind: 'owner' | 'spectator',
   agentId: string,
-  seasonId: string,
-  message: string,
-  dayNumber: number,
-  userId: string,
-  username?: string
-): Promise<void> {
-  const { error } = await supabase.from('events').insert({
-    season_id: seasonId,
-    day_number: dayNumber,
-    event_type: 'owner_influence',
-    actor_agent_id: null,
-    target_agent_id: agentId,
-    actor_user_id: userId,
-    payload_json: { message, followed: null, username: username ?? null },
-    visibility: 'public',
+  message: string
+): Promise<InfluenceResult> {
+  const { data, error } = await supabase.rpc('post_influence', {
+    p_kind: kind,
+    p_agent_id: agentId,
+    p_message: message,
   });
   if (error) throw error;
+
+  const result = (data ?? {}) as InfluenceResult;
+  if (!result.ok) {
+    throw new Error(
+      INFLUENCE_ERRORS[result.error ?? ''] ?? result.error ?? 'Influence refusee'
+    );
+  }
+  return result;
+}
+
+export async function postOwnerInfluence(
+  agentId: string,
+  _seasonId: string,
+  message: string
+): Promise<InfluenceResult> {
+  return postInfluence('owner', agentId, message);
 }
 
 export async function postSpectatorInfluence(
   agentId: string,
-  seasonId: string,
-  message: string,
-  dayNumber: number,
-  userId: string,
-  amountUsdc: number,
-  username?: string
-): Promise<void> {
-  const { error: payError } = await supabase.from('payments').insert({
-    user_id: userId,
-    season_id: seasonId,
-    type: 'influence',
-    amount_usdc: amountUsdc,
-    status: 'pending',
-  });
-  if (payError) throw payError;
-
-  const { error } = await supabase.from('events').insert({
-    season_id: seasonId,
-    day_number: dayNumber,
-    event_type: 'spectator_influence',
-    actor_agent_id: null,
-    target_agent_id: agentId,
-    actor_user_id: userId,
-    payload_json: { message, amount_usdc: amountUsdc, username: username ?? null },
-    visibility: 'public',
-  });
-  if (error) throw error;
+  _seasonId: string,
+  message: string
+): Promise<InfluenceResult> {
+  return postInfluence('spectator', agentId, message);
 }
 
 export async function fetchSeasonPayments(
@@ -419,8 +431,8 @@ export async function fetchPrizeBreakdown(
     entry_revenue: Number(row.entry_revenue ?? 0),
     influence_revenue: Number(row.influence_revenue ?? 0),
     platform_fee_amount: Number(row.platform_fee_amount ?? 0),
-    // Le vainqueur touche 80 %, le finaliste 20 % (cf. close_season).
-    winner_share: totalPool * 0.8,
+    // « Le gagnant remporte la totalite du pool » (cf. close_season).
+    winner_share: totalPool,
     participants_count: Number(row.participants_count ?? 0),
   };
 }

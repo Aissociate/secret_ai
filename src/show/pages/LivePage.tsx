@@ -67,6 +67,8 @@ export function LivePage() {
         setAdminNotice(
           res.skipped === 'not_live'
             ? "La saison n'est pas en cours."
+            : (res as { error?: string }).error === 'admin_required'
+            ? 'Action reservee aux administrateurs.'
             : res.skipped === 'locked'
             ? 'Une progression est deja en cours, reessayez.'
             : 'Progression impossible pour le moment.'
@@ -350,7 +352,10 @@ export function LivePage() {
           </section>
 
           <aside className="lg:col-span-2 space-y-4">
-            <CeremonyCountdown />
+            <CeremonyCountdown
+              dayStartedAt={season?.day_started_at}
+              durationHours={season?.day_duration_hours}
+            />
 
             {season && breakdown && (
               <PrizePoolCard

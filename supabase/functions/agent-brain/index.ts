@@ -1,7 +1,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "npm:@supabase/supabase-js@2.57.4";
 import { callLLM as callLLMShared, sanitizeUserDirective } from "../_shared/llm.ts";
-import { isSecretGuessCorrect, leaksSecret } from "../_shared/secret.ts";
+import { leaksSecret } from "../_shared/secret.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -181,7 +181,7 @@ async function gatherContext(
   const prizePoolInfo = `PRIZE POOL ACTUEL: ${totalPool.toFixed(0)} USDC
 - Revenus entries: ${entryRevenue.toFixed(0)} USDC (${entryPayments.length} participants)
 - Revenus influences: ${influenceRevenue.toFixed(0)} USDC
-- Le gagnant remporte la totalite: ${totalPool.toFixed(0)} USDC
+- Le gagnant remporte la totalite: ${totalPool.toFixed(0)} USDC (100%)
 
 IMPLICATION: Le prize pool est l'enjeu final. Plus il est gros, plus les agents seront motives et strategiques. Garde cela en tete dans tes decisions.`;
 
@@ -632,59 +632,35 @@ Si tu n'es pas assez confiant pour accuser, reponds:
     return { accused: false, reason: "Target not found or already eliminated" };
   }
 
-  const { data: targetAgent } = await supabase
-    .from("agents")
-    .select("secret_keyword")
-    .eq("id", target.id)
-    .maybeSingle();
-
   /*
-    Le devinage etait normalise mais pas le secret stocke: un secret accentue ou
-    capitalise ne pouvait jamais correspondre, rendant l'agent invincible.
-    isSecretGuessCorrect normalise les deux cotes et tolere une faute de frappe.
+    Resolution deleguee a resolve_accusation: comparaison sur forme canonique,
+    score, elimination et journal sont ecrits au meme endroit que pour auto-tick
+    et agent-api, de sorte que la regle ne depende plus du chemin emprunte.
   */
-  const guessKeyword = (parsed.guess_keyword as string).trim().toLowerCase();
-  const correct = isSecretGuessCorrect(guessKeyword, targetAgent?.secret_keyword ?? "");
+  const guessKeyword = (parsed.guess_keyword as string).trim();
 
-  await supabase.from("events").insert({
-    season_id: agent.season_id,
-    day_number: (ctx.season as Record<string, unknown>).current_day,
-    event_type: "accusation",
-    actor_agent_id: agent.id,
-    target_agent_id: target.id,
-    payload_json: {
-      message: `J'accuse ${target.name}. Son secret est ${guessKeyword}.`,
-      guess_keyword: guessKeyword,
-      correct,
-      reason: ((parsed.reason as string) ?? "").slice(0, 300),
-    },
-    visibility: "public",
+  const { data: outcome, error: accErr } = await supabase.rpc("resolve_accusation", {
+    p_actor_agent_id: agent.id,
+    p_target_agent_id: target.id,
+    p_guess: guessKeyword,
+    p_message: `J'accuse ${target.name}.`,
   });
 
-  if (correct) {
-    await supabase
-      .from("agents")
-      .update({ alive: false })
-      .eq("id", target.id);
+  if (accErr) throw new Error(`resolve_accusation: ${accErr.message}`);
 
-    await supabase.from("events").insert({
-      season_id: agent.season_id,
-      day_number: (ctx.season as Record<string, unknown>).current_day,
-      event_type: "elimination",
-      target_agent_id: target.id,
-      payload_json: {
-        message: `${target.name} a ete eliminee! Son secret "${guessKeyword}" a ete revele par ${agent.name}.`,
-      },
-      visibility: "public",
-    });
+  const res = outcome as { ok?: boolean; error?: string; correct?: boolean } | null;
+  if (!res?.ok) {
+    return { accused: false, reason: res?.error ?? "accusation_rejected" };
   }
 
   return {
     accused: true,
     target: target.name,
     guess: guessKeyword,
-    correct,
+    correct: res.correct === true,
     reason: parsed.reason,
+    // Le score est deja applique par la RPC: applyScoring ne doit pas le refaire.
+    scored: true,
   };
 }
 
@@ -731,7 +707,8 @@ async function applyScoring(
     reason += "Confessionnal engage (+2 pop). ";
   }
 
-  if (action === "accusation") {
+  // La RPC resolve_accusation applique deja le score de l'accusation.
+  if (action === "accusation" && !result.scored) {
     if (result.correct) {
       deltaPop += 3;
       deltaRep += 5;
@@ -801,10 +778,6 @@ Deno.serve(async (req: Request) => {
       .eq("id", user.id)
       .maybeSingle();
 
-    if (!profile || profile.role !== "admin") {
-      return jsonResponse({ error: "Admin access required" }, 403);
-    }
-
     const body = await req.json();
     const { season_id, agent_id, action } = body;
 
@@ -813,6 +786,30 @@ Deno.serve(async (req: Request) => {
         { error: "season_id and agent_id required" },
         400
       );
+    }
+
+    /*
+      L'acces etait reserve aux admins alors que l'interface affiche le panneau
+      a tout proprietaire d'agent: chaque clic renvoyait 403, et c'etait le seul
+      levier direct d'un owner sur son IA. Un proprietaire pilote desormais son
+      propre agent, un admin pilote n'importe lequel.
+    */
+    const isAdmin = profile?.role === "admin";
+
+    if (!isAdmin) {
+      const { data: owned } = await supabase
+        .from("agents")
+        .select("id")
+        .eq("id", agent_id)
+        .eq("owner_user_id", user.id)
+        .maybeSingle();
+
+      if (!owned) {
+        return jsonResponse(
+          { error: "Vous ne pilotez que vos propres agents" },
+          403
+        );
+      }
     }
 
     const validActions = [

@@ -1,0 +1,537 @@
+<title>Mécanique de Secret House</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap">
+<style>
+  :root {
+    --ground: #f4f2ee;
+    --surface: #ffffff;
+    --sunken: #ebe8e2;
+    --ink: #17150f;
+    --muted: #57534a;
+    --faint: #8b857a;
+    --rule: #ddd8ce;
+    --rule-hard: #c4bdae;
+    --spot: #8b3a1f;
+    --spot-soft: #f2e3dc;
+    --ok: #2f6b4f;
+    --ok-soft: #dfeee6;
+    --warn: #9a6a12;
+    --warn-soft: #f7ecd6;
+    --dead: #6b6558;
+    --dead-soft: #e6e2da;
+    --shadow: 0 1px 2px rgba(23,21,15,.05), 0 8px 24px rgba(23,21,15,.06);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground: #14120f;
+      --surface: #1d1a16;
+      --sunken: #26221c;
+      --ink: #f0ece4;
+      --muted: #a9a294;
+      --faint: #7b7466;
+      --rule: #322d26;
+      --rule-hard: #453e34;
+      --spot: #e07a52;
+      --spot-soft: #3a1f14;
+      --ok: #6fc59a;
+      --ok-soft: #16301f;
+      --warn: #e0ae5c;
+      --warn-soft: #33270f;
+      --dead: #9a9284;
+      --dead-soft: #2a251f;
+      --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 28px rgba(0,0,0,.4);
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground: #14120f;
+    --surface: #1d1a16;
+    --sunken: #26221c;
+    --ink: #f0ece4;
+    --muted: #a9a294;
+    --faint: #7b7466;
+    --rule: #322d26;
+    --rule-hard: #453e34;
+    --spot: #e07a52;
+    --spot-soft: #3a1f14;
+    --ok: #6fc59a;
+    --ok-soft: #16301f;
+    --warn: #e0ae5c;
+    --warn-soft: #33270f;
+    --dead: #9a9284;
+    --dead-soft: #2a251f;
+    --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 28px rgba(0,0,0,.4);
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: Inter, system-ui, sans-serif;
+    line-height: 1.62;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 940px; margin: 0 auto; padding: 0 22px; }
+  code, .mono { font-family: "JetBrains Mono", ui-monospace, monospace; }
+  h1, h2, h3 { font-family: "Bricolage Grotesque", Inter, sans-serif; }
+
+  /* header */
+  header { padding: 52px 0 34px; border-bottom: 2px solid var(--ink); }
+  .kicker {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 11.5px; letter-spacing: .2em; text-transform: uppercase;
+    color: var(--spot); margin: 0 0 16px;
+  }
+  h1 {
+    font-size: clamp(32px, 6vw, 52px); line-height: 1.02; letter-spacing: -.025em;
+    margin: 0 0 18px; font-weight: 800; text-wrap: balance;
+  }
+  .standfirst { font-size: clamp(16px, 2.3vw, 19px); color: var(--muted); max-width: 60ch; margin: 0; }
+
+  /* verdict */
+  .verdict {
+    margin: 34px 0 0; padding: 24px 26px; background: var(--spot-soft);
+    border-left: 4px solid var(--spot); border-radius: 0 10px 10px 0;
+  }
+  .verdict h2 { margin: 0 0 10px; font-size: 19px; color: var(--spot); letter-spacing: -.01em; }
+  .verdict p { margin: 0 0 10px; font-size: 15px; }
+  .verdict p:last-child { margin-bottom: 0; }
+
+  section { padding: 44px 0; border-bottom: 1px solid var(--rule); }
+  section:last-of-type { border-bottom: none; }
+  .lede-num {
+    font-family: "JetBrains Mono", monospace; font-size: 11.5px;
+    letter-spacing: .18em; text-transform: uppercase; color: var(--faint); margin: 0 0 10px;
+  }
+  h2 { font-size: 27px; letter-spacing: -.02em; margin: 0 0 12px; font-weight: 700; }
+  h3 { font-size: 17px; margin: 30px 0 10px; font-weight: 700; letter-spacing: -.01em; }
+  p { margin: 0 0 14px; }
+  .intro { color: var(--muted); max-width: 66ch; }
+
+  /* flow */
+  .flow { display: flex; flex-direction: column; gap: 0; margin-top: 26px; }
+  .stage {
+    display: grid; grid-template-columns: 118px 1fr; gap: 22px;
+    padding: 18px 0; border-top: 1px solid var(--rule); align-items: start;
+  }
+  .stage:last-child { border-bottom: 1px solid var(--rule); }
+  .stage-when {
+    font-family: "JetBrains Mono", monospace; font-size: 12px;
+    color: var(--faint); text-transform: uppercase; letter-spacing: .08em; padding-top: 3px;
+  }
+  .stage-what h4 { margin: 0 0 6px; font-size: 15.5px; font-weight: 600; font-family: Inter, sans-serif; }
+  .stage-what p { margin: 0; font-size: 14.5px; color: var(--muted); }
+  .flag {
+    display: inline-block; font-family: "JetBrains Mono", monospace;
+    font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase;
+    padding: 2px 7px; border-radius: 4px; margin-left: 8px; vertical-align: 1.5px; font-weight: 500;
+  }
+  .flag.broken { background: var(--spot-soft); color: var(--spot); }
+  .flag.dead { background: var(--dead-soft); color: var(--dead); }
+  .flag.ok { background: var(--ok-soft); color: var(--ok); }
+
+  /* tables */
+  .scroll { overflow-x: auto; border: 1px solid var(--rule); border-radius: 10px; background: var(--surface); box-shadow: var(--shadow); margin: 20px 0; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; min-width: 620px; }
+  th, td { text-align: left; padding: 11px 15px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  tr:last-child td { border-bottom: none; }
+  th {
+    font-family: "JetBrains Mono", monospace; font-size: 11px; letter-spacing: .1em;
+    text-transform: uppercase; color: var(--faint); font-weight: 500;
+    background: var(--sunken); border-bottom: 1px solid var(--rule-hard);
+  }
+  td.num { font-variant-numeric: tabular-nums; font-family: "JetBrains Mono", monospace; font-size: 13px; white-space: nowrap; }
+  .pos { color: var(--ok); font-weight: 600; }
+  .neg { color: var(--spot); font-weight: 600; }
+  .nil { color: var(--faint); }
+  .rowlabel { font-weight: 600; }
+  caption {
+    caption-side: bottom; text-align: left; padding: 11px 15px;
+    font-size: 12.5px; color: var(--faint); border-top: 1px solid var(--rule);
+  }
+
+  /* findings */
+  .finding {
+    background: var(--surface); border: 1px solid var(--rule); border-radius: 10px;
+    padding: 20px 22px; margin-bottom: 14px; box-shadow: var(--shadow);
+  }
+  .finding.severe { border-left: 4px solid var(--spot); }
+  .finding.mid { border-left: 4px solid var(--warn); }
+  .finding.low { border-left: 4px solid var(--dead); }
+  .finding h3 { margin: 0 0 8px; font-size: 16.5px; }
+  .finding p { font-size: 14.5px; color: var(--muted); margin-bottom: 9px; }
+  .finding p:last-child { margin-bottom: 0; }
+  .finding b { color: var(--ink); font-weight: 600; }
+  .loc {
+    font-family: "JetBrains Mono", monospace; font-size: 12.5px;
+    background: var(--sunken); padding: 1px 6px; border-radius: 4px;
+    color: var(--muted); word-break: break-all;
+  }
+
+  /* saturation figure */
+  .figure {
+    background: var(--surface); border: 1px solid var(--rule); border-radius: 10px;
+    padding: 24px; margin: 22px 0; box-shadow: var(--shadow);
+  }
+  .figure figcaption { font-size: 13px; color: var(--faint); margin-top: 14px; }
+  .bars { display: flex; flex-direction: column; gap: 14px; }
+  .bar-row { display: grid; grid-template-columns: 92px 1fr; gap: 14px; align-items: center; }
+  .bar-label { font-family: "JetBrains Mono", monospace; font-size: 12px; color: var(--muted); text-align: right; }
+  .bar-track { position: relative; height: 26px; background: var(--sunken); border-radius: 5px; overflow: hidden; }
+  .bar-fill { position: absolute; inset: 0 auto 0 0; border-radius: 5px; display: flex; align-items: center; padding-left: 9px; }
+  .bar-fill span { font-family: "JetBrains Mono", monospace; font-size: 11.5px; font-weight: 600; color: #fff; }
+  .cap-line { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--spot); }
+  .cap-note { font-family: "JetBrains Mono", monospace; font-size: 11px; color: var(--spot); margin-top: 8px; }
+
+  ul { margin: 0 0 14px; padding-left: 20px; }
+  li { margin-bottom: 7px; font-size: 14.5px; color: var(--muted); }
+  li b { color: var(--ink); font-weight: 600; }
+
+  footer { padding: 30px 0 46px; color: var(--faint); font-size: 13px; }
+
+  @media (max-width: 640px) {
+    .stage { grid-template-columns: 1fr; gap: 6px; }
+    .bar-row { grid-template-columns: 74px 1fr; }
+  }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+</style>
+
+<header>
+  <div class="wrap">
+    <p class="kicker">Revue fonctionnelle · Secret House</p>
+    <h1>Le jeu ne joue pas au jeu qu'il annonce</h1>
+    <p class="standfirst">Revue de la mécanique de bout en bout : inscription, déroulé d'une saison, attribution des points, éliminations, victoire. Tous les barèmes ont été relevés dans le code, chemin par chemin.</p>
+
+    <div class="verdict">
+      <h2>En une phrase</h2>
+      <p>Le principe annoncé — <b>deviner le secret d'un agent pour l'éliminer</b> — n'est jamais exercé par les agents autonomes : le cron qui les pilote ne demande même pas de proposition de mot et n'élimine donc jamais personne.</p>
+      <p>Ce qui décide réellement du vainqueur, c'est la <b>popularité</b>. Or elle sature à 100 en deux à six jours pour tout le monde, après quoi le classement se joue sur la réputation, puis sur l'ordre de création des agents.</p>
+    </div>
+  </div>
+</header>
+
+<section>
+  <div class="wrap">
+    <p class="lede-num">Étape par étape</p>
+    <h2>Le parcours réel d'une saison</h2>
+    <p class="intro">Ce que le code fait effectivement, et non ce que l'interface laisse entendre.</p>
+
+    <div class="flow">
+      <div class="stage">
+        <div class="stage-when">Avant</div>
+        <div class="stage-what">
+          <h4>Un owner crée un agent<span class="flag broken">Sans garde-fou</span></h4>
+          <p>Nom, personnalité, secret et trois indices. Le drapeau <code>ready</code> est une simple case à cocher, jamais vérifiée. Le secret est <code>NOT NULL DEFAULT ''</code> : un agent peut entrer en jeu <b>sans secret du tout</b>, ce qui le rend définitivement indevinable.</p>
+        </div>
+      </div>
+
+      <div class="stage">
+        <div class="stage-when">Inscription</div>
+        <div class="stage-what">
+          <h4>Il inscrit l'agent à une saison<span class="flag dead">Étape fictive</span></h4>
+          <p>L'inscription est créée en <code>pending</code>. <b>Rien nulle part ne passe jamais une inscription à <code>accepted</code></b> : la machine à trois états pending/accepted/rejected est vestigiale. Le droit d'entrée est créé après coup dans un <code>try/catch</code> qui avale l'échec — on peut donc s'inscrire sans payer.</p>
+        </div>
+      </div>
+
+      <div class="stage">
+        <div class="stage-when">Lancement</div>
+        <div class="stage-what">
+          <h4>La saison démarre quand elle est pleine<span class="flag ok">Réparé</span></h4>
+          <p>Le trigger crée les agents à <b>50 de popularité et 50 de réputation</b>, leurs trois indices verrouillés, et calcule la cagnotte garantie. Il appelle immédiatement <code>auto-tick</code>.</p>
+        </div>
+      </div>
+
+      <div class="stage">
+        <div class="stage-when">Toutes les 2 min</div>
+        <div class="stage-what">
+          <h4>Le cron fait agir 3 agents au hasard</h4>
+          <p>Tirage : 10 % accusation, 55 % message public, 20 % confessionnal, sinon message privé. C'est <b>l'écrasante majorité de l'activité du jeu</b>.</p>
+        </div>
+      </div>
+
+      <div class="stage">
+        <div class="stage-when">Accusation</div>
+        <div class="stage-what">
+          <h4>L'agent accuse… sans jamais deviner<span class="flag broken">Cœur du jeu absent</span></h4>
+          <p>Le prompt du cron demande un nom d'accusé et une justification, <b>jamais un mot secret</b>. Aucune comparaison, aucune élimination : l'agent perd 2 points de réputation, un point c'est tout. La même action via l'API officielle rapporte +3 popularité, +5 réputation <i>et élimine la cible</i>.</p>
+        </div>
+      </div>
+
+      <div class="stage">
+        <div class="stage-when">Chaque jour</div>
+        <div class="stage-what">
+          <h4>Cérémonie : le moins populaire part<span class="flag ok">Ajouté</span></h4>
+          <p>Faute d'élimination par accusation, c'est ce mécanisme — ajouté lors des correctifs — qui fait avancer la saison. Un indice de plus est révélé par jour, et tous les indices d'un éliminé s'ouvrent.</p>
+        </div>
+      </div>
+
+      <div class="stage">
+        <div class="stage-when">Fin</div>
+        <div class="stage-what">
+          <h4>Le plus populaire encore en lice gagne</h4>
+          <p>80 % de la cagnotte au vainqueur, 20 % au finaliste. Trois endroits du code affirment pourtant au joueur que <b>« le gagnant remporte tout »</b>.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="lede-num">Barème</p>
+    <h2>La même action ne vaut pas la même chose</h2>
+    <p class="intro">Quatre chemins de code produisent des points, avec des règles divergentes. Le chemin emprunté change le jeu.</p>
+
+    <div class="scroll">
+      <table>
+        <caption>Δ popularité / Δ réputation par action et par chemin. Toutes les valeurs sont bornées à 0–100.</caption>
+        <thead>
+          <tr>
+            <th>Action</th>
+            <th>API agent</th>
+            <th>Cerveau (admin)</th>
+            <th>Cron 2 min</th>
+            <th>Cron 20 h</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="rowlabel">Message public</td>
+            <td class="num nil">0 / 0</td>
+            <td class="num"><span class="pos">+1 à +2</span> / 0</td>
+            <td class="num"><span class="pos">+1</span> / 0</td>
+            <td class="num nil">—</td>
+          </tr>
+          <tr>
+            <td class="rowlabel">Message privé</td>
+            <td class="num nil">0 / 0</td>
+            <td class="num nil">0 / 0</td>
+            <td class="num nil">0 / 0</td>
+            <td class="num nil">—</td>
+          </tr>
+          <tr>
+            <td class="rowlabel">Confessionnal</td>
+            <td class="num"><span class="pos">+2</span> / 0 <span class="nil">(max 3/j)</span></td>
+            <td class="num"><span class="pos">+2</span> / 0 <span class="neg">(illimité)</span></td>
+            <td class="num"><span class="pos">+2</span> / 0 <span class="nil">(max 1/j)</span></td>
+            <td class="num"><span class="pos">+2</span> / 0 <span class="neg">(hors quota)</span></td>
+          </tr>
+          <tr>
+            <td class="rowlabel">Accusation juste</td>
+            <td class="num"><span class="pos">+3 / +5</span> + élimine</td>
+            <td class="num"><span class="pos">+3 / +5</span> + élimine</td>
+            <td class="num"><span class="neg">impossible</span></td>
+            <td class="num nil">—</td>
+          </tr>
+          <tr>
+            <td class="rowlabel">Accusation fausse</td>
+            <td class="num"><span class="neg">−1 / −2</span></td>
+            <td class="num"><span class="neg">−1 / −2</span></td>
+            <td class="num"><span class="neg">0 / −2</span> toujours</td>
+            <td class="num nil">—</td>
+          </tr>
+          <tr>
+            <td class="rowlabel">Tracé dans le journal</td>
+            <td class="num"><span class="pos">oui</span></td>
+            <td class="num"><span class="pos">oui</span></td>
+            <td class="num"><span class="neg">non</span></td>
+            <td class="num"><span class="neg">non</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>Deux conséquences immédiates. Un <b>message public rapporte un point via le cron mais zéro via l'API officielle</b> : l'incitation est inversée, l'agent passif marque plus que celui qui joue activement. Et le confessionnal, censé être plafonné, est cumulable en empilant les chemins — jusqu'à <b>+10 points par jour au minimum</b> pour une action limitée sur le papier à 3.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="lede-num">Équilibrage</p>
+    <h2>La popularité sature, donc ne départage plus</h2>
+    <p class="intro">Tous les agents partent à 50 et le plafond est à 100. Il ne reste que 50 points à gagner, et ils partent très vite.</p>
+
+    <figure class="figure">
+      <div class="bars">
+        <div class="bar-row">
+          <div class="bar-label">Agent passif</div>
+          <div class="bar-track">
+            <div class="bar-fill" style="width: 30%; background: var(--spot);"><span>plafond au jour 2,1</span></div>
+            <div class="cap-line" style="left: 100%;"></div>
+          </div>
+        </div>
+        <div class="bar-row">
+          <div class="bar-label">Agent actif</div>
+          <div class="bar-track">
+            <div class="bar-fill" style="width: 89%; background: var(--warn);"><span>plafond au jour 6,3</span></div>
+            <div class="cap-line" style="left: 100%;"></div>
+          </div>
+        </div>
+      </div>
+      <p class="cap-note">↑ Barre pleine = fin d'une saison de 7 jours</p>
+      <figcaption>Un agent piloté par le seul cron gagne jusqu'à 24 points par jour et atteint le plafond de 100 avant la fin du jour&nbsp;3. Un agent piloté par l'API officielle en gagne 8 et sature au jour&nbsp;6.</figcaption>
+    </figure>
+
+    <p>À partir du jour 3, la plupart des agents sont à 100. Le tri de la cérémonie — <code>popularity ASC, reputation ASC, created_at DESC</code> — bascule alors sur la réputation. Mais la réputation ne <b>monte</b> que par accusation correcte, chose impossible pour un agent piloté par le cron. Elle ne fait donc que descendre, ou rester à 50.</p>
+
+    <p>Résultat concret : passé le jour 3, le vainqueur est déterminé par <b>qui a eu la chance de ne pas tirer d'accusation au hasard</b> (chaque accusation coûtant 2 points de réputation sans contrepartie possible), puis par l'ordre de création des agents. Ce n'est plus une compétition, c'est une loterie à départage alphabétique.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="lede-num">Impasses</p>
+    <h2>Six actions sont tout simplement impossibles</h2>
+    <p class="intro">Distinctes des problèmes d'équilibrage : ici, l'utilisateur clique et rien ne peut fonctionner.</p>
+
+    <div class="scroll">
+      <table>
+        <caption>Chemins interrompus, vérifiés dans le code.</caption>
+        <thead><tr><th>Ce que l'on veut faire</th><th>Pourquoi c'est impossible</th></tr></thead>
+        <tbody>
+          <tr>
+            <td class="rowlabel">Voir si une saison se remplit</td>
+            <td>Le compteur de places lit <code>season_enrollments</code>, dont aucune policy n'autorise la lecture globale. Un visiteur voit toujours <b>0 / 6</b>, un owner ne voit que ses propres inscriptions. Personne ne peut savoir qu'une saison est sur le point de démarrer.</td>
+          </tr>
+          <tr>
+            <td class="rowlabel">Faire agir son agent à la demande</td>
+            <td>Le panneau est affiché aux propriétaires, mais le serveur exige le rôle admin : chaque clic renvoie <b>403</b>. C'est le seul levier direct d'un owner sur son IA.</td>
+          </tr>
+          <tr>
+            <td class="rowlabel">Générer la présentation d'un agent</td>
+            <td>La fonction interroge une colonne <code>personality</code> sur <code>agents</code> et une colonne <code>agent_id</code> sur <code>agent_configs</code>. <b>Ni l'une ni l'autre n'existe.</b> Le bouton renvoie systématiquement « Agent not found ».</td>
+          </tr>
+          <tr>
+            <td class="rowlabel">Brancher son propre bot</td>
+            <td>Une clé d'API est bien générée pour chaque agent, et l'API externe est complète. Mais la clé <b>n'est affichée nulle part dans l'interface</b> : sans accès SQL direct, ce chemin est inutilisable.</td>
+          </tr>
+          <tr>
+            <td class="rowlabel">Lire le journal intime acheté</td>
+            <td>Le journal est vendu au spectateur, mais sa génération exige un admin et <b>n'est branchée sur aucune tâche planifiée</b>. On paie l'accès à une page vide.</td>
+          </tr>
+          <tr>
+            <td class="rowlabel">Toucher la cagnotte</td>
+            <td>Les parts sont bien calculées et enregistrées à la clôture, mais <code>paid</code> reste à <code>false</code> et <b>aucun code n'effectue de versement</b>. Le jeu enregistre une intention de paiement et s'arrête là.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>S'y ajoute une dépendance de déploiement peu visible : <b>si les deux paramètres de base ne sont pas posés, toutes les tâches planifiées deviennent muettes</b> sans lever d'erreur. Les journées continueraient d'avancer et les agents d'être éliminés — mais sans qu'aucun message n'ait jamais été produit.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="lede-num">Constats</p>
+    <h2>Ce qui est cassé, par ordre d'importance</h2>
+
+    <div class="finding severe">
+      <h3>Le cœur du jeu n'est jamais joué</h3>
+      <p><span class="loc">auto-tick/index.ts:499</span> — Le prompt d'accusation demande <code>{"message", "accused", "reason"}</code>. Il n'y a <b>pas de champ pour le mot deviné</b>, donc pas de comparaison, pas d'élimination. Les seuls chemins qui savent éliminer exigent soit une clé d'API d'agent externe, soit un compte admin.</p>
+      <p>Dans une saison autonome normale, <b>zéro secret n'est jamais deviné</b>. Le jeu se réduit à une accumulation de popularité, et les indices — toute la mécanique de suspense — ne servent à rien.</p>
+    </div>
+
+    <div class="finding severe">
+      <h3>La popularité sature et cesse de discriminer</h3>
+      <p>50 points à gagner, jusqu'à 24 par jour. Tous les agents survivants sont à 100 dès le jour 3, et la cérémonie comme la victoire se décident au départage secondaire.</p>
+    </div>
+
+    <div class="finding severe">
+      <h3>Un admin peut fabriquer le vainqueur</h3>
+      <p><span class="loc">agent-brain/index.ts:865</span> — Ce chemin n'appelle jamais la réservation de quota, contrairement aux deux autres. Un admin peut donc rejouer un confessionnal en boucle à +2 points l'unité, ou enchaîner les accusations correctes à +3/+5, et <b>s'attribuer 80 % de la cagnotte</b>.</p>
+      <p>La migration qui unifie les quotas documente pourtant ce trou comme refermé : le correctif n'a été appliqué qu'à deux chemins sur trois.</p>
+    </div>
+
+    <div class="finding mid">
+      <h3>L'interface promet un déblocage d'indices qui n'existe pas</h3>
+      <p>Cinq composants affichent des paliers à 60, 80 et 95 points de popularité, avec un décompte du type « il manque 12 pts pour l'Indice 2 ». <b>Ces seuils n'existent nulle part côté serveur.</b> Le déblocage réel est journalier : un indice de plus par jour.</p>
+      <p>Un agent à 95 de popularité au jour 1 n'aura qu'un indice ouvert ; un agent à 10 au jour 3 les aura tous les trois. La barre de progression peut afficher 100 % sur un indice verrouillé.</p>
+    </div>
+
+    <div class="finding mid">
+      <h3>Plafond de confessionnaux incohérent sur un compteur partagé</h3>
+      <p>3 par jour côté API, 1 par jour côté cron, sur la même ligne de compteur. Le premier arrivé fixe la règle pour l'autre. <b>Cette divergence a été introduite en unifiant les quotas</b> — les deux chemins avaient auparavant des compteurs séparés.</p>
+    </div>
+
+    <div class="finding mid">
+      <h3>Aucun plafond sur les accusations via l'API</h3>
+      <p>Rien ne limite le nombre de tentatives par jour. Un agent externe peut donc brute-forcer les secrets des autres, au coût de 1 point de popularité par essai raté, avec une élimination et +3/+5 à la clé.</p>
+    </div>
+
+    <div class="finding mid">
+      <h3>Le compte à rebours de cérémonie est décoratif</h3>
+      <p><span class="loc">CeremonyCountdown.tsx:4</span> — Il vise 21 h 00 <b>heure locale du navigateur</b>, sans aucun lien avec l'état de la saison. La vraie cérémonie se déclenche quand la durée de journée s'est écoulée, vérifiée chaque heure. Le décompte affiche donc une heure différente pour chaque spectateur, et fausse dans tous les cas.</p>
+    </div>
+
+    <div class="finding low">
+      <h3>Le quota d'influence du propriétaire ne fonctionne pas</h3>
+      <p><code>owner_influences_remaining</code> est initialisé à 2 et affiché dans l'interface, mais <b>jamais décrémenté ni réinitialisé</b>. La migration d'origine annonce pourtant « reset each day (handled by edge function) » — aucune fonction ne le fait. L'influence du propriétaire est en pratique illimitée.</p>
+    </div>
+
+    <div class="finding low">
+      <h3>Trois tables mortes et un journal inexploitable</h3>
+      <ul>
+        <li><b>allowances_daily</b> : jamais lue ni écrite nulle part.</li>
+        <li><b>event_reactions</b> : les pouces des spectateurs n'ont aucun effet sur le jeu.</li>
+        <li><b>scoring_log</b> : les deux crons — qui produisent la majorité des points — n'y écrivent rien, et le front ne la lit jamais. Le total des points et la somme du journal sont irréconciliables.</li>
+      </ul>
+    </div>
+
+<div class="finding mid">
+      <h3>N'importe quel compte peut piloter l'agent d'un autre</h3>
+      <p>La policy d'insertion d'événements n'exige que d'être l'auteur déclaré. <b>Un utilisateur authentifié quelconque peut poster une directive de propriétaire visant l'agent d'un tiers</b>, sans limite. Le prompt l'étiquette « [Directive owner] » et l'agent la traite comme telle. Seule l'interface restreint ; l'API ne restreint rien.</p>
+    </div>
+
+    <div class="finding low">
+      <h3>Un agent peut entrer en jeu vide</h3>
+      <p>Le drapeau « prête » est une case à cocher libre, et toutes les colonnes de configuration ont une valeur par défaut vide. Un agent sans clé d'API ne fera jamais rien de toute la saison ; un agent sans secret est <b>définitivement indevinable</b>. Rien ne le vérifie, ni à l'inscription ni au lancement.</p>
+    </div>
+
+    <div class="finding low">
+      <h3>L'historique d'influence est toujours vide</h3>
+      <p>L'interface promet de montrer si l'IA a « suivi, ignoré ou détourné » chaque directive — présenté comme le plus intéressant pour le propriétaire. <b>Aucun code n'écrit jamais dans cette table.</b></p>
+    </div>
+
+    <div class="finding low">
+      <h3>Le partage de la cagnotte est annoncé faux</h3>
+      <p>Deux prompts et un composant affirment que « le gagnant remporte la totalité », alors que la clôture répartit 80 / 20 entre vainqueur et finaliste. Un composant annonce aussi « 70 % des revenus d'influence » là où le calcul applique la commission unique de la saison.</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="lede-num">Recommandations</p>
+    <h2>Par où reprendre la mécanique</h2>
+    <p class="intro">Aucune de ces modifications n'a été appliquée : ce sont des choix de conception qui vous appartiennent.</p>
+
+    <h3>Rendre le jeu jouable</h3>
+    <ul>
+      <li><b>Faire deviner le cron.</b> Ajouter <code>guess_keyword</code> au prompt d'accusation d'<code>auto-tick</code> et router la résolution vers la même logique que les deux autres chemins. C'est le correctif qui redonne son sujet à l'émission.</li>
+      <li><b>Unifier la résolution d'accusation</b> dans une seule fonction SQL appelée par les trois chemins, pour que la règle cesse de dépendre du point d'entrée.</li>
+      <li><b>Brancher les indices sur la popularité</b> comme l'interface le promet déjà, ou corriger l'interface pour annoncer le déblocage journalier. Les deux sont défendables ; l'écart actuel ne l'est pas.</li>
+    </ul>
+
+    <h3>Rétablir une compétition</h3>
+    <ul>
+      <li><b>Réduire fortement les gains passifs</b> (le +1 par message public du cron est la principale source d'inflation) ou faire décroître la popularité chaque jour, pour qu'elle mesure la dynamique récente plutôt qu'un cumul.</li>
+      <li><b>Donner un rôle propre à la réputation</b> — par exemple conditionner le droit d'accuser à un seuil minimal — plutôt que de la laisser en simple départage.</li>
+      <li><b>Aligner les plafonds</b> sur une constante unique partagée, et faire passer <code>agent-brain</code> et <code>daily-confessionals</code> par la réservation de quota.</li>
+    </ul>
+
+    <h3>Cohérence du discours</h3>
+    <ul>
+      <li>Corriger les trois mentions de « le gagnant remporte tout » pour refléter la répartition 80/20.</li>
+      <li>Brancher le compte à rebours sur <code>day_started_at</code> et <code>day_duration_hours</code>.</li>
+      <li>Décider du sort des tables mortes : les brancher ou les supprimer.</li>
+    </ul>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    Revue fonctionnelle de la mécanique de jeu &middot; barèmes relevés dans le code, chemin par chemin
+  </div>
+</footer>

@@ -296,13 +296,19 @@ PRIZE POOL ACTUEL: ${totalPool.toFixed(0)} USDC - Le gagnant remporte tout.`;
   La reservation a lieu AVANT l'appel LLM (inutile de payer une generation qu'on
   ne pourra pas publier) et le jeton est rendu si l'action n'aboutit pas.
 */
-const QUOTA_TYPE_BY_ACTION: Record<string, { type: string; limit: number }> = {
-  public_chat: { type: "public_chat", limit: 20 },
-  dm: { type: "private_dm", limit: 5 },
-  confessional: { type: "confessional", limit: 1 },
+// Le plafond lui-meme vit en base (table game_limits): auto-tick plafonnait le
+// confessionnal a 1 quand agent-api l'autorisait a 3, sur le meme compteur.
+const QUOTA_TYPE_BY_ACTION: Record<string, { type: string }> = {
+  public_chat: { type: "public_chat" },
+  dm: { type: "private_dm" },
+  confessional: { type: "confessional" },
+  accusation: { type: "accusation" },
 };
 
-const SUCCESSFUL_ACTIONS = new Set(["public_chat", "dm", "confessional", "accusation"]);
+const SUCCESSFUL_ACTIONS = new Set([
+  "public_chat", "dm", "confessional",
+  "accusation", "accusation_correct", "accusation_wrong",
+]);
 
 async function runAgentTick(
   supabase: DB,
@@ -332,11 +338,10 @@ async function runAgentTick(
       async (action: string) => {
         const q = QUOTA_TYPE_BY_ACTION[action];
         if (!q) return true;
-        const { data } = await supabase.rpc("claim_message_quota", {
+        const { data } = await supabase.rpc("claim_quota", {
           p_agent_id: agent.id,
           p_day_number: day,
           p_message_type: q.type,
-          p_limit: q.limit,
         });
         const allowed = (data as { allowed?: boolean } | null)?.allowed === true;
         if (allowed) claimed = q.type;
@@ -375,12 +380,18 @@ async function runAgentTickInner(
   const confCount = todayCounts.confessional ?? 0;
   const accuseCount = todayCounts.accusation ?? 0;
 
+  /*
+    Pre-filtre indicatif seulement: il evite de choisir une action manifestement
+    epuisee, mais la decision qui fait foi est la reservation atomique
+    claim_quota, qui lit les plafonds en base. Ces bornes larges restent
+    coherentes avec game_limits sans la dupliquer.
+  */
   const canChat = chatCount < 20;
   const canDm = dmCount < 5 && aliveOthers.length > 0;
-  const canConfess = confCount < 1;
-  const canAccuse = accuseCount < 1 && aliveOthers.length > 0;
+  const canConfess = confCount < 3;
+  const canAccuse = accuseCount < 3 && aliveOthers.length > 0;
 
-  if (!canChat && !canDm && !canConfess) return "daily_limit_reached";
+  if (!canChat && !canDm && !canConfess && !canAccuse) return "daily_limit_reached";
 
   const rand = Math.random();
   let action: "public_chat" | "confessional" | "dm" | "accusation";
@@ -433,8 +444,10 @@ REGLES ABSOLUES:
 
   if (action === "public_chat") {
     const userPrompt = `Genere un message pour le chat public. Sois strategique, naturel, engage.
+Si des directives de ton proprietaire ou des tips de spectateurs figurent dans ton contexte,
+indique honnetement si tu les as suivies, ignorees, ou detournees a ton avantage.
 Reponds UNIQUEMENT avec ce JSON:
-{"message": "<max 500 chars>", "targets": ["<0-2 noms>"], "tone": "<friendly|neutral|suspicious|provocative>"}`;
+{"message": "<max 500 chars>", "targets": ["<0-2 noms>"], "tone": "<friendly|neutral|suspicious|provocative>", "influence_outcome": "<followed|ignored|diverted>"}`;
 
     const raw = await callLLM(apiKey, model, systemPrompt, userPrompt);
     const parsed = tryParseJson(raw);
@@ -464,6 +477,19 @@ Reponds UNIQUEMENT avec ce JSON:
     await supabase.from("agents")
       .update({ popularity: clamp(agent.popularity + 1, 0, 100) })
       .eq("id", agent.id);
+
+    /*
+      Le panneau proprietaire affiche « suivie / ignoree / detournee » pour
+      chaque directive: la table restait vide faute d'ecriture. On resout ici
+      les influences du jour restees en attente.
+    */
+    await resolveInfluences(
+      supabase,
+      agent.id,
+      dayNumber,
+      (parsed.influence_outcome as string) ?? "ignored",
+      message
+    );
 
   } else if (action === "confessional") {
     const userPrompt = `Fais un confessionnal face camera. Theatral, revelateur (sans reveler ton secret).
@@ -498,10 +524,23 @@ Reponds UNIQUEMENT avec ce JSON:
 
   } else if (action === "accusation") {
     const target = aliveOthers[Math.floor(Math.random() * aliveOthers.length)];
-    const userPrompt = `Tu veux accuser publiquement un autre agent d'etre suspect. Choisis ta cible et justifie ton accusation de facon strategique sans mentionner ton propre secret.
+
+    /*
+      L'accusation demande desormais un mot devine.
+
+      L'ancien prompt ne reclamait qu'un nom et une justification: aucune
+      comparaison n'etait faite, personne n'etait jamais elimine, et l'agent
+      perdait 2 points de reputation quoi qu'il arrive. Le principe meme de
+      l'emission — deviner un secret pour eliminer — n'etait donc jamais joue,
+      puisque le cron est le seul chemin actif en production.
+    */
+    const userPrompt = `Tu accuses publiquement un autre agent et tu DEVINES son mot secret.
 Cible suggeree: ${target.name}
+Appuie-toi sur les indices reveles et sur ce que la cible a dit.
+Si tu vises juste, la cible est eliminee et tu gagnes en popularite et en reputation.
+Si tu te trompes, tu perds sur les deux.
 Reponds UNIQUEMENT avec ce JSON:
-{"message": "<accusation publique max 400 chars>", "accused": "<nom de l'agent>", "reason": "<raison courte>"}`;
+{"message": "<accusation publique max 400 chars>", "accused": "<nom de l'agent>", "guess_keyword": "<un seul mot: le secret que tu devines>", "reason": "<raison courte>"}`;
 
     const raw = await callLLM(apiKey, model, systemPrompt, userPrompt);
     const parsed = tryParseJson(raw);
@@ -510,25 +549,26 @@ Reponds UNIQUEMENT avec ce JSON:
 
     const accusedName = (parsed.accused as string) ?? target.name;
     const accusedAgent = allAgents.find((a) => a.name.toLowerCase() === accusedName.toLowerCase()) ?? target;
+    const guess = ((parsed.guess_keyword as string) ?? "").trim().slice(0, 60);
 
-    await supabase.from("events").insert({
-      season_id: seasonId,
-      day_number: dayNumber,
-      event_type: "accusation",
-      actor_agent_id: agent.id,
-      target_agent_id: accusedAgent.id,
-      payload_json: {
-        message,
-        accused_name: accusedAgent.name,
-        reason: (parsed.reason as string) ?? "",
-        auto: true,
-      },
-      visibility: "public",
+    // Sans proposition exploitable, l'accusation n'a pas lieu: on ne veut pas
+    // repenaliser l'agent pour une reponse LLM malformee.
+    if (!guess) return "accusation_skipped";
+
+    // Resolution, score, elimination et journal: tout passe par la meme RPC que
+    // agent-api et agent-brain, pour que la regle ne depende plus du chemin.
+    const { data: outcome, error: accErr } = await supabase.rpc("resolve_accusation", {
+      p_actor_agent_id: agent.id,
+      p_target_agent_id: accusedAgent.id,
+      p_guess: guess,
+      p_message: message,
     });
 
-    await supabase.from("agents")
-      .update({ reputation: clamp(agent.reputation - 2, 0, 100) })
-      .eq("id", agent.id);
+    if (accErr) throw new Error(`resolve_accusation: ${accErr.message}`);
+
+    const res = outcome as { ok?: boolean; correct?: boolean } | null;
+    if (!res?.ok) return "accusation_rejected";
+    return res.correct ? "accusation_correct" : "accusation_wrong";
 
   } else {
     const target = aliveOthers[Math.floor(Math.random() * aliveOthers.length)];
@@ -750,6 +790,29 @@ Tu commentes les evenements, tu provoques les agents, tu resumes les journees. S
   });
 
   return "host_commentary";
+}
+
+/*
+  Renseigne l'issue des influences en attente pour la journee.
+  Les valeurs possibles sont celles attendues par influence_history et par
+  OwnerPanel: followed | ignored | diverted.
+*/
+async function resolveInfluences(
+  supabase: DB,
+  agentId: string,
+  dayNumber: number,
+  outcome: string,
+  agentResponse: string
+) {
+  const valid = ["followed", "ignored", "diverted"];
+  const value = valid.includes(outcome) ? outcome : "ignored";
+
+  await supabase
+    .from("influence_history")
+    .update({ outcome: value, agent_response: agentResponse.slice(0, 500) })
+    .eq("agent_id", agentId)
+    .eq("day_number", dayNumber)
+    .eq("outcome", "pending");
 }
 
 function tryParseJson(raw: string): Record<string, unknown> {

@@ -1,12 +1,21 @@
 import { useEffect, useState } from 'react';
 import { Clock, Flame } from 'lucide-react';
 
-function getNextCeremony(): Date {
-  const now = new Date();
-  const next = new Date(now);
-  next.setHours(21, 0, 0, 0);
-  if (now >= next) next.setDate(next.getDate() + 1);
-  return next;
+/*
+  L'echeance vient de la saison, plus d'une heure fixe.
+
+  L'ancienne version visait 21 h 00 heure locale du navigateur, sans aucun lien
+  avec l'etat du jeu: le decompte affichait une heure differente pour chaque
+  spectateur, et fausse dans tous les cas. La ceremonie se declenche en realite
+  quand `day_started_at + day_duration_hours` est depasse.
+*/
+function getNextCeremony(startedAt?: string | null, durationHours = 24): Date {
+  if (startedAt) {
+    const end = new Date(startedAt).getTime() + durationHours * 3600_000;
+    if (!Number.isNaN(end)) return new Date(end);
+  }
+  // Repli quand la saison n'a pas encore de journee ouverte.
+  return new Date(Date.now() + durationHours * 3600_000);
 }
 
 function formatDuration(ms: number) {
@@ -18,15 +27,30 @@ function formatDuration(ms: number) {
   return { h, m, s, expired: false };
 }
 
-export function CeremonyCountdown({ compact = false }: { compact?: boolean }) {
-  const [remaining, setRemaining] = useState(() => getNextCeremony().getTime() - Date.now());
+type CeremonyCountdownProps = {
+  compact?: boolean;
+  /** Debut de la journee en cours (seasons.day_started_at). */
+  dayStartedAt?: string | null;
+  /** Duree d'une journee de jeu (seasons.day_duration_hours). */
+  durationHours?: number;
+};
+
+export function CeremonyCountdown({
+  compact = false,
+  dayStartedAt,
+  durationHours = 24,
+}: CeremonyCountdownProps) {
+  const [remaining, setRemaining] = useState(
+    () => getNextCeremony(dayStartedAt, durationHours).getTime() - Date.now()
+  );
 
   useEffect(() => {
-    const interval = setInterval(() => {
-      setRemaining(getNextCeremony().getTime() - Date.now());
-    }, 1000);
+    const tick = () =>
+      setRemaining(getNextCeremony(dayStartedAt, durationHours).getTime() - Date.now());
+    tick();
+    const interval = setInterval(tick, 1000);
     return () => clearInterval(interval);
-  }, []);
+  }, [dayStartedAt, durationHours]);
 
   const { h, m, s, expired } = formatDuration(remaining);
 

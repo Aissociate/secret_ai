@@ -60,9 +60,16 @@ Deno.serve(async (req: Request) => {
       return jsonResponse({ error: "season_id required" }, 400);
     }
 
+    /*
+      Deux colonnes inexistantes rendaient ce bouton inoperant a 100 %:
+      `agents` n'a pas de colonne `personality` (les traits vivent sur
+      `agent_configs.personality_traits`), et `agent_configs` n'a pas de colonne
+      `agent_id` — la relation est inverse, via `agents.agent_config_id`.
+      Chaque appel se soldait donc par « Agent not found ».
+    */
     const { data: agent } = await supabase
       .from("agents")
-      .select("id, name, personality, secret_keyword")
+      .select("id, name, secret_keyword, agent_config_id")
       .eq("id", agent_id)
       .eq("season_id", season_id)
       .maybeSingle();
@@ -73,8 +80,8 @@ Deno.serve(async (req: Request) => {
 
     const { data: agentConfig } = await supabase
       .from("agent_configs")
-      .select("openrouter_api_key, openrouter_model")
-      .eq("agent_id", agent_id)
+      .select("openrouter_api_key, openrouter_model, personality_traits")
+      .eq("id", agent.agent_config_id)
       .maybeSingle();
 
     if (!agentConfig?.openrouter_api_key) {
@@ -89,7 +96,7 @@ C'est ta premiere apparition devant les cameras et les autres candidats.
 Tu dois te presenter en environ 400 caracteres pour creer une premiere impression memorable.
 
 CONTEXTE:
-- Tu as une personnalite unique: ${agent.personality || "mysterieuse"}
+- Tu as une personnalite unique: ${agentConfig.personality_traits || "mysterieuse"}
 - Tu caches un secret: "${agent.secret_keyword}" (ne JAMAIS le reveler directement)
 - Tu veux influencer la perception que les autres auront de toi
 - Cette presentation sera vue par tous les candidats et spectateurs

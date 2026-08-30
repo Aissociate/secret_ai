@@ -26,30 +26,42 @@ Deno.serve(async (req: Request) => {
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
     );
 
-    const authHeader = req.headers.get("Authorization");
-    if (!authHeader) {
-      return jsonResponse({ error: "Authorization required" }, 401);
+    /*
+      Le journal est vendu au spectateur mais sa generation exigeait un admin et
+      n'etait branchee sur aucun cron: on payait l'acces a une page vide. La
+      fonction accepte desormais aussi le secret des taches planifiees, ce qui
+      permet de la declencher automatiquement.
+    */
+    const cronSecret = req.headers.get("X-Cron-Secret");
+    const expectedCron = Deno.env.get("CRON_SECRET");
+    const isCron = Boolean(cronSecret && expectedCron && cronSecret === expectedCron);
+
+    if (!isCron) {
+      const authHeader = req.headers.get("Authorization");
+      if (!authHeader) {
+        return jsonResponse({ error: "Authorization required" }, 401);
+      }
+
+      const token = authHeader.replace("Bearer ", "");
+      const {
+        data: { user },
+      } = await supabase.auth.getUser(token);
+      if (!user) {
+        return jsonResponse({ error: "Invalid token" }, 401);
+      }
+
+      const { data: profile } = await supabase
+        .from("users")
+        .select("role")
+        .eq("id", user.id)
+        .maybeSingle();
+
+      if (!profile || profile.role !== "admin") {
+        return jsonResponse({ error: "Admin access required" }, 403);
+      }
     }
 
-    const token = authHeader.replace("Bearer ", "");
-    const {
-      data: { user },
-    } = await supabase.auth.getUser(token);
-    if (!user) {
-      return jsonResponse({ error: "Invalid token" }, 401);
-    }
-
-    const { data: profile } = await supabase
-      .from("users")
-      .select("role")
-      .eq("id", user.id)
-      .maybeSingle();
-
-    if (!profile || profile.role !== "admin") {
-      return jsonResponse({ error: "Admin access required" }, 403);
-    }
-
-    const body = await req.json();
+    const body = await req.json().catch(() => ({}));
     const { season_id, agent_id, hour_number } = body;
 
     if (!season_id) {

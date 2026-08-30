@@ -439,7 +439,11 @@ export function AgentPage() {
           />
 
           {season?.status === 'live' && (
-            <CeremonyCountdown compact />
+            <CeremonyCountdown
+              compact
+              dayStartedAt={season?.day_started_at}
+              durationHours={season?.day_duration_hours}
+            />
           )}
 
           {season && breakdown && (

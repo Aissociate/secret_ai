@@ -24,9 +24,6 @@ interface OwnerPanelProps {
 export function OwnerPanel({
   agentId,
   seasonId,
-  dayNumber,
-  userId,
-  username,
   ownerRemaining,
   allAgents,
   onSent,
@@ -65,7 +62,7 @@ export function OwnerPanel({
 
     setBusy(true);
     try {
-      await postOwnerInfluence(agentId, seasonId, trimmed.slice(0, 300), dayNumber, userId, username);
+      await postOwnerInfluence(agentId, seasonId, trimmed.slice(0, 300));
       setInfo("Directive envoyee. L'IA decidera de son comportement.");
       setMessage('');
       setSuggestTarget('');

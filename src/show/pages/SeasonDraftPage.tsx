@@ -16,6 +16,7 @@ interface Season {
   max_agents: number;
   max_agents_per_owner: number;
   current_day: number;
+  duration_days?: number;
   created_at: string;
   started_at: string | null;
 }
@@ -55,6 +56,10 @@ export function SeasonDraftPage() {
   const [newInfluenceFee, setNewInfluenceFee] = useState(1);
   const [newMaxAgents, setNewMaxAgents] = useState(6);
   const [newMaxAgentsPerOwner, setNewMaxAgentsPerOwner] = useState(2);
+  // La base sait gerer 1 a 14 jours, mais le formulaire ne l'exposait pas:
+  // toute saison heritait de 7 jours de 24 h.
+  const [newDurationDays, setNewDurationDays] = useState(7);
+  const [newDayHours, setNewDayHours] = useState(24);
   const [creating, setCreating] = useState(false);
   const [launchingId, setLaunchingId] = useState<string | null>(null);
 
@@ -109,12 +114,19 @@ export function SeasonDraftPage() {
       .order('created_at', { ascending: false });
     setSeasons((s ?? []) as Season[]);
 
-    const { data: allEnr } = await supabase
-      .from('season_enrollments')
-      .select('season_id');
+    /*
+      La table season_enrollments n'est lisible que par son proprietaire: le
+      comptage direct renvoyait 0 a un visiteur et seulement ses propres
+      inscriptions a un owner, donc personne ne pouvait voir qu'une saison
+      allait se lancer. La vue agregee expose le decompte sans reveler qui
+      s'est inscrit.
+    */
+    const { data: fill } = await supabase
+      .from('season_fill')
+      .select('season_id, enrolled_count');
     const counts: Record<string, number> = {};
-    for (const row of allEnr ?? []) {
-      counts[row.season_id] = (counts[row.season_id] ?? 0) + 1;
+    for (const row of fill ?? []) {
+      counts[row.season_id] = row.enrolled_count ?? 0;
     }
     setTotalCounts(counts);
 
@@ -176,6 +188,8 @@ export function SeasonDraftPage() {
       influence_fee_usdc: newInfluenceFee,
       max_agents: newMaxAgents,
       max_agents_per_owner: newMaxAgentsPerOwner,
+      duration_days: newDurationDays,
+      day_duration_hours: newDayHours,
       current_day: 1,
     });
 
@@ -264,6 +278,28 @@ export function SeasonDraftPage() {
                   className="w-full px-3 py-2.5 rounded-xl bg-white/[0.04] border border-white/8 text-white text-sm focus:outline-none focus:border-white/20"
                   min={1}
                   max={4}
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-white/40 mb-1">Duree (jours)</label>
+                <input
+                  type="number"
+                  value={newDurationDays}
+                  onChange={(e) => setNewDurationDays(Math.min(14, Math.max(1, Number(e.target.value))))}
+                  className="w-full px-3 py-2.5 rounded-xl bg-white/[0.04] border border-white/8 text-white text-sm focus:outline-none focus:border-white/20"
+                  min={1}
+                  max={14}
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-white/40 mb-1">Duree d&apos;une journee (h)</label>
+                <input
+                  type="number"
+                  value={newDayHours}
+                  onChange={(e) => setNewDayHours(Math.min(48, Math.max(1, Number(e.target.value))))}
+                  className="w-full px-3 py-2.5 rounded-xl bg-white/[0.04] border border-white/8 text-white text-sm focus:outline-none focus:border-white/20"
+                  min={1}
+                  max={48}
                 />
               </div>
             </div>
@@ -524,7 +560,7 @@ export function SeasonDraftPage() {
                       <div>
                         <h3 className="text-lg font-bold">{s.title}</h3>
                         <div className="flex items-center gap-4 mt-1 text-xs text-white/40 flex-wrap">
-                          <span>Jour {s.current_day}/7</span>
+                          <span>Jour {s.current_day}/{s.duration_days ?? 7}</span>
                           <span className="flex items-center gap-1">
                             <Trophy className="w-3 h-3 text-amber-400" />
                             <span className="text-amber-400 font-bold">{formatUsdc(s.prize_pool_usdc)} USDC</span>

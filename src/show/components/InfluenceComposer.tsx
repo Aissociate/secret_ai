@@ -17,7 +17,6 @@ export function InfluenceComposer({
   me,
   agentId,
   seasonId,
-  dayNumber,
   isOwnerOfAgent,
   ownerRemaining,
   onSent,
@@ -59,11 +58,12 @@ export function InfluenceComposer({
     setBusy(true);
     try {
       if (mode === 'owner' && canUseOwner) {
-        await postOwnerInfluence(agentId, seasonId, trimmed.slice(0, 300), dayNumber, me.id, me.username);
+        await postOwnerInfluence(agentId, seasonId, trimmed.slice(0, 300));
         setInfo("Influence envoyee. L'IA decidera si elle suit ou non.");
       } else if (mode === 'spectator' && canUseSpectator) {
-        const finalAmount = me.role === 'admin' ? 0 : amount;
-        await postSpectatorInfluence(agentId, seasonId, trimmed.slice(0, 200), dayNumber, me.id, finalAmount, me.username);
+        // Le montant est fixe par le serveur d'apres le tarif de la saison:
+        // le client ne peut plus l'imposer.
+        await postSpectatorInfluence(agentId, seasonId, trimmed.slice(0, 200));
         if (me.role === 'admin') {
           setInfo("Influence envoyee (gratuit admin). L'IA decidera si elle suit ou non.");
         } else {

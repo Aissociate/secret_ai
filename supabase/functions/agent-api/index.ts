@@ -1,6 +1,6 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "npm:@supabase/supabase-js@2.57.4";
-import { isSecretGuessCorrect, leaksSecret } from "../_shared/secret.ts";
+import { leaksSecret } from "../_shared/secret.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -9,10 +9,14 @@ const corsHeaders = {
     "Content-Type, Authorization, X-Client-Info, Apikey",
 };
 
+// Valeurs de reference pour les messages d'erreur. Le plafond qui fait foi est
+// lu en base via claim_quota (table game_limits), pour que les trois chemins ne
+// puissent plus reserver sur le meme compteur avec des limites differentes.
 const LIMITS = {
   public_chat: 20,
   private_dm: 5,
   confessional: 3,
+  accusation: 3,
 };
 
 function jsonResponse(body: unknown, status = 200) {
@@ -174,11 +178,10 @@ Deno.serve(async (req: Request) => {
 
       // Reservation atomique du quota: l'ancien lire/incrementer/ecrire perdait
       // des increments des que deux requetes se croisaient.
-      const { data: quota } = await supabase.rpc("claim_message_quota", {
+      const { data: quota } = await supabase.rpc("claim_quota", {
         p_agent_id: agent.id,
         p_day_number: season.current_day,
         p_message_type: "public_chat",
-        p_limit: LIMITS.public_chat,
       });
 
       if (!quota?.allowed) {
@@ -246,11 +249,10 @@ Deno.serve(async (req: Request) => {
         return jsonResponse({ error: "Target agent not found" }, 404);
       }
 
-      const { data: quota } = await supabase.rpc("claim_message_quota", {
+      const { data: quota } = await supabase.rpc("claim_quota", {
         p_agent_id: agent.id,
         p_day_number: season.current_day,
         p_message_type: "private_dm",
-        p_limit: LIMITS.private_dm,
       });
 
       if (!quota?.allowed) {
@@ -306,11 +308,10 @@ Deno.serve(async (req: Request) => {
 
       // LIMITS.confessional etait declare mais jamais applique: cette route
       // accordait +2 de popularite sans aucun plafond journalier.
-      const { data: quota } = await supabase.rpc("claim_message_quota", {
+      const { data: quota } = await supabase.rpc("claim_quota", {
         p_agent_id: agent.id,
         p_day_number: season.current_day,
         p_message_type: "confessional",
-        p_limit: LIMITS.confessional,
       });
 
       if (!quota?.allowed) {
@@ -350,7 +351,7 @@ Deno.serve(async (req: Request) => {
     if (req.method === "POST" && path === "accuse") {
       const body = await req.json();
       const targetAgentId = body.target_agent_id;
-      const guessKeyword = (body.guess_keyword ?? "").trim().toLowerCase();
+      const guessKeyword = (body.guess_keyword ?? "").trim();
 
       if (!targetAgentId || !guessKeyword) {
         return jsonResponse(
@@ -359,69 +360,53 @@ Deno.serve(async (req: Request) => {
         );
       }
 
-      const { data: targetAgent } = await supabase
-        .from("agents")
-        .select("id, name, secret_keyword, alive")
-        .eq("id", targetAgentId)
-        .eq("season_id", season.id)
-        .maybeSingle();
-
-      if (!targetAgent || !targetAgent.alive) {
-        return jsonResponse(
-          { error: "Target agent not found or already eliminated" },
-          404
-        );
-      }
-
-      // Normalisation des deux cotes: un secret accentue ou capitalise etait
-      // impossible a deviner, ce qui rendait l'agent invincible.
-      const correct = isSecretGuessCorrect(guessKeyword, targetAgent.secret_keyword);
-
-      await supabase.from("events").insert({
-        season_id: season.id,
-        day_number: season.current_day,
-        event_type: "accusation",
-        actor_agent_id: agent.id,
-        target_agent_id: targetAgentId,
-        payload_json: {
-          message: `J'accuse ${targetAgent.name}. Son secret est ${guessKeyword}.`,
-          guess_keyword: guessKeyword,
-          correct,
-        },
-        visibility: "public",
+      /*
+        Une accusation consomme un jeton de quota: sans plafond, un operateur
+        pouvait brute-forcer le dictionnaire des secrets adverses, chaque echec
+        ne coutant qu'un point de popularite.
+      */
+      const { data: quota } = await supabase.rpc("claim_quota", {
+        p_agent_id: agent.id,
+        p_day_number: season.current_day,
+        p_message_type: "accusation",
       });
 
-      if (correct) {
-        await supabase
-          .from("agents")
-          .update({ alive: false })
-          .eq("id", targetAgentId);
-
-        await supabase.from("events").insert({
-          season_id: season.id,
-          day_number: season.current_day,
-          event_type: "elimination",
-          target_agent_id: targetAgentId,
-          payload_json: {
-            message: `${targetAgent.name} a ete eliminee! Son secret "${guessKeyword}" a ete revele par ${agent.name}.`,
-          },
-          visibility: "public",
-        });
-
-        await logScore(
-          supabase, agent.id, season.id, season.current_day,
-          3, 5, "Accusation correcte (+3 pop, +5 rep)",
-          agent.popularity, agent.reputation
-        );
-      } else {
-        await logScore(
-          supabase, agent.id, season.id, season.current_day,
-          -1, -2, "Accusation ratee (-1 pop, -2 rep)",
-          agent.popularity, agent.reputation
+      if (!quota?.allowed) {
+        return jsonResponse(
+          { error: `Daily accusation limit reached (${LIMITS.accusation}/day)` },
+          429
         );
       }
 
-      return jsonResponse({ ok: true, correct });
+      // Resolution, score, elimination et journal: point de passage unique
+      // partage avec auto-tick et agent-brain.
+      const { data: outcome, error: accErr } = await supabase.rpc("resolve_accusation", {
+        p_actor_agent_id: agent.id,
+        p_target_agent_id: targetAgentId,
+        p_guess: guessKeyword,
+        p_message: "",
+      });
+
+      if (accErr) {
+        await supabase.rpc("release_message_quota", {
+          p_agent_id: agent.id,
+          p_day_number: season.current_day,
+          p_message_type: "accusation",
+        });
+        return jsonResponse({ error: accErr.message }, 500);
+      }
+
+      const res = outcome as { ok?: boolean; error?: string; correct?: boolean } | null;
+      if (!res?.ok) {
+        await supabase.rpc("release_message_quota", {
+          p_agent_id: agent.id,
+          p_day_number: season.current_day,
+          p_message_type: "accusation",
+        });
+        return jsonResponse({ error: res?.error ?? "accusation_rejected" }, 400);
+      }
+
+      return jsonResponse({ ok: true, correct: res.correct, remaining: quota.remaining });
     }
 
     return jsonResponse({ error: "Not found", available_endpoints: [

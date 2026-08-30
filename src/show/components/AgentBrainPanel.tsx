@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Brain, MessageSquare, Lock, Swords, Video, Loader2, CheckCircle, AlertCircle, Sparkles } from 'lucide-react';
 import { triggerAgentBrain } from '../api/client';
 import type { Agent, AgentBrainAction } from '../api/types';
@@ -66,6 +66,29 @@ export function AgentBrainPanel({
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null);
   const [generatingPresentation, setGeneratingPresentation] = useState(false);
+  const [apiKey, setApiKey] = useState<string | null>(null);
+  const [keyShown, setKeyShown] = useState(false);
+
+  /*
+    La cle d'API de l'agent est generee au lancement et l'API externe est
+    complete, mais elle n'etait affichee nulle part: brancher son propre bot
+    etait impossible sans acces SQL direct. La policy « Owners can view own
+    agents » la rend lisible a son proprietaire uniquement.
+  */
+  useEffect(() => {
+    let cancelled = false;
+    supabase
+      .from('agents')
+      .select('api_key')
+      .eq('id', agentId)
+      .maybeSingle()
+      .then(({ data }) => {
+        if (!cancelled) setApiKey((data?.api_key as string) ?? null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [agentId]);
 
   const otherAgents = allAgents.filter((a) => a.id !== agentId && a.alive);
 
@@ -144,13 +167,37 @@ export function AgentBrainPanel({
       <div className="p-5 space-y-4">
         <div className="flex items-center gap-2">
           <Brain className="w-4 h-4 text-sky-400" />
-          <h3 className="text-sm font-bold text-sky-300">Agent Brain (Admin)</h3>
+          <h3 className="text-sm font-bold text-sky-300">Pilotage de l&apos;agent</h3>
         </div>
 
         <p className="text-xs text-white/40 leading-relaxed">
-          Declenche une action IA pour cet agent. L'IA utilisera tout le contexte
+          Declenche une action IA pour cet agent. L&apos;IA utilisera tout le contexte
           disponible (indices, DMs, influences, suspicions) pour generer sa reponse.
         </p>
+
+        {apiKey && (
+          <div className="p-2.5 rounded-lg bg-white/[0.02] border border-white/[0.06]">
+            <div className="flex items-center justify-between gap-2 mb-1">
+              <span className="text-[10px] font-semibold text-white/50 uppercase tracking-wider">
+                Cle API de l&apos;agent
+              </span>
+              <button
+                onClick={() => setKeyShown((v) => !v)}
+                aria-label={keyShown ? 'Masquer la cle' : 'Afficher la cle'}
+                className="text-[10px] text-sky-300/70 hover:text-sky-200 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 rounded"
+              >
+                {keyShown ? 'Masquer' : 'Afficher'}
+              </button>
+            </div>
+            <code className="block text-[11px] text-white/60 break-all font-mono">
+              {keyShown ? apiKey : '•'.repeat(32)}
+            </code>
+            <p className="text-[10px] text-white/30 mt-1.5 leading-relaxed">
+              A envoyer dans l&apos;en-tete <code>X-Agent-API-Key</code> pour piloter cet
+              agent depuis votre propre bot.
+            </p>
+          </div>
+        )}
 
         <div className="flex items-center gap-2 p-2.5 rounded-lg bg-white/[0.02] border border-white/[0.06]">
           <div className="flex-1">
