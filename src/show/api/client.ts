@@ -26,6 +26,17 @@ import type {
   SuspicionMatrix,
 } from './types';
 
+/*
+  Listes de colonnes explicites plutot que select('*').
+  Les vues *_public masquent deja les colonnes sensibles, mais nommer les
+  colonnes evite qu'un futur ajout de champ secret ne fuite par inadvertance.
+*/
+const AGENT_PUBLIC_COLUMNS = 'id, season_id, agent_config_id, owner_user_id, name, avatar_url, presentation, alive, popularity, reputation, confessional_count, owner_influences_remaining, created_at, secret_keyword' as const;
+
+const HINT_PUBLIC_COLUMNS = 'id, agent_id, level, unlocked, unlocked_at, hint_text' as const;
+
+const EVENT_COLUMNS = 'id, season_id, day_number, event_type, actor_agent_id, target_agent_id, actor_user_id, payload_json, visibility, created_at, video_job_id' as const;
+
 export async function fetchSeason(seasonId: string): Promise<Season | null> {
   if (isDemoSeason(seasonId)) return DEMO_SEASON;
   const { data, error } = await supabase
@@ -35,6 +46,45 @@ export async function fetchSeason(seasonId: string): Promise<Season | null> {
     .maybeSingle();
   if (error) throw error;
   return data;
+}
+
+/*
+  Fait avancer la saison d'un jour (ceremonie d'elimination incluse), ou la
+  termine si elle est arrivee au bout. `force` ignore la duree de journee, pour
+  qu'un admin puisse derouler une saison de demonstration sans attendre.
+*/
+export async function advanceSeasonDay(
+  seasonId: string,
+  force = false
+): Promise<{
+  ok: boolean;
+  skipped?: string;
+  day?: number;
+  agents_remaining?: number;
+  eliminated?: string | null;
+  winner_name?: string | null;
+  reason?: string;
+  next_at?: string;
+}> {
+  const { data, error } = await supabase.rpc('advance_season_day', {
+    p_season_id: seasonId,
+    p_force: force,
+  });
+  if (error) throw error;
+  return data as { ok: boolean };
+}
+
+/** Termine immediatement une saison et designe le vainqueur. */
+export async function closeSeasonNow(
+  seasonId: string,
+  reason = 'admin_closed'
+): Promise<{ ok: boolean; winner_name?: string | null; prize_pool?: number }> {
+  const { data, error } = await supabase.rpc('close_season', {
+    p_season_id: seasonId,
+    p_reason: reason,
+  });
+  if (error) throw error;
+  return data as { ok: boolean };
 }
 
 export async function updateSeasonStatus(
@@ -50,13 +100,14 @@ export async function updateSeasonStatus(
 
 export async function fetchAgents(seasonId: string): Promise<Agent[]> {
   if (isDemoSeason(seasonId)) return DEMO_AGENTS;
+  // agents_public exclut secret_keyword et api_key tant que l'agent est en jeu.
   const { data, error } = await supabase
-    .from('agents')
-    .select('*')
+    .from('agents_public')
+    .select(AGENT_PUBLIC_COLUMNS)
     .eq('season_id', seasonId)
     .order('created_at', { ascending: true });
   if (error) throw error;
-  return data ?? [];
+  return (data ?? []) as Agent[];
 }
 
 export async function fetchAgent(agentId: string): Promise<AgentDetail | null> {
@@ -74,22 +125,22 @@ export async function fetchAgent(agentId: string): Promise<AgentDetail | null> {
   }
 
   const { data: agent, error } = await supabase
-    .from('agents')
-    .select('*')
+    .from('agents_public')
+    .select(AGENT_PUBLIC_COLUMNS)
     .eq('id', agentId)
     .maybeSingle();
   if (error) throw error;
   if (!agent) return null;
 
   const { data: hints } = await supabase
-    .from('hints')
-    .select('*')
+    .from('hints_public')
+    .select(HINT_PUBLIC_COLUMNS)
     .eq('agent_id', agentId)
     .order('level', { ascending: true });
 
   const { data: confessionals } = await supabase
-    .from('events')
-    .select('*')
+    .from('events_feed')
+    .select(EVENT_COLUMNS)
     .eq('actor_agent_id', agentId)
     .eq('event_type', 'confessional')
     .eq('visibility', 'public')
@@ -97,8 +148,8 @@ export async function fetchAgent(agentId: string): Promise<AgentDetail | null> {
     .limit(1);
 
   const { data: publicMsgs } = await supabase
-    .from('events')
-    .select('*')
+    .from('events_feed')
+    .select(EVENT_COLUMNS)
     .eq('actor_agent_id', agentId)
     .eq('event_type', 'public_chat')
     .eq('visibility', 'public')
@@ -123,11 +174,11 @@ export async function fetchFeed(
     return { events };
   }
 
+  // events_feed masque le contenu des DM non deverrouilles cote serveur.
   let query = supabase
-    .from('events')
-    .select('*')
+    .from('events_feed')
+    .select(EVENT_COLUMNS)
     .eq('season_id', seasonId)
-    .eq('visibility', 'public')
     .order('created_at', { ascending: false })
     .limit(100);
 
@@ -151,10 +202,9 @@ export async function fetchAgentEvents(
   }
 
   const { data, error } = await supabase
-    .from('events')
-    .select('*')
+    .from('events_feed')
+    .select(EVENT_COLUMNS)
     .eq('season_id', seasonId)
-    .eq('visibility', 'public')
     .or(`actor_agent_id.eq.${agentId},target_agent_id.eq.${agentId}`)
     .order('created_at', { ascending: false })
     .limit(50);
@@ -173,8 +223,8 @@ export async function fetchHintsBoard(
   if (agentIds.length === 0) return [];
 
   const { data: hints, error } = await supabase
-    .from('hints')
-    .select('*')
+    .from('hints_public')
+    .select(HINT_PUBLIC_COLUMNS)
     .in('agent_id', agentIds)
     .order('level', { ascending: true });
 
@@ -201,11 +251,10 @@ export async function fetchSuspicion(
   const agents = await fetchAgents(seasonId);
 
   const { data: accusations } = await supabase
-    .from('events')
-    .select('*')
+    .from('events_feed')
+    .select(EVENT_COLUMNS)
     .eq('season_id', seasonId)
-    .eq('event_type', 'accusation')
-    .eq('visibility', 'public');
+    .eq('event_type', 'accusation');
 
   const n = agents.length;
   const matrix: number[][] = Array.from({ length: n }, () =>
@@ -226,11 +275,10 @@ export async function fetchSuspicion(
   }
 
   const { data: chats } = await supabase
-    .from('events')
-    .select('*')
+    .from('events_feed')
+    .select(EVENT_COLUMNS)
     .eq('season_id', seasonId)
-    .eq('event_type', 'public_chat')
-    .eq('visibility', 'public');
+    .eq('event_type', 'public_chat');
 
   for (const ev of chats ?? []) {
     const targets =
@@ -320,37 +368,60 @@ export async function fetchSeasonPayments(
   return (data ?? []) as Payment[];
 }
 
-export function computePrizeBreakdown(
-  season: Season,
-  payments: Payment[]
-): PrizeBreakdown {
-  const confirmedPayments = payments.filter((p) => p.status === 'confirmed');
-  const entryPayments = confirmedPayments.filter((p) => p.type === 'entry');
-  const influencePayments = confirmedPayments.filter((p) => p.type === 'influence');
+/*
+  Le calcul se fait desormais en SQL (compute_prize_pool).
 
-  const entryRevenue = entryPayments.reduce((sum, p) => sum + Number(p.amount_usdc), 0);
-  const influenceRevenue = influencePayments.reduce((sum, p) => sum + Number(p.amount_usdc), 0);
-
-  const platformFeeOnEntry = entryRevenue * (season.platform_fee_pct / 100);
-  const platformFeeOnInfluence = influenceRevenue * 0.3;
-  const platformFeeAmount = platformFeeOnEntry + platformFeeOnInfluence;
-
-  const poolFromEntries = entryRevenue - platformFeeOnEntry;
-  const poolFromInfluence = influenceRevenue - platformFeeOnInfluence;
-  const totalPool = Math.max(Number(season.prize_pool_usdc), poolFromEntries + poolFromInfluence);
-
-  const winnerShare = totalPool;
-
-  return {
-    total_pool: totalPool,
-    entry_revenue: entryRevenue,
-    influence_revenue: influenceRevenue,
-    platform_fee_amount: platformFeeAmount,
-    winner_share: winnerShare,
-    participants_count: entryPayments.length,
+  L'ancienne version agregait `payments` cote client, or la policy SELECT ne
+  renvoie a un non-admin que ses propres paiements: chaque spectateur voyait
+  donc une cagnotte differente et fausse. Le Math.max sur prize_pool_usdc
+  empechait en outre les revenus d'influence de remonter dans le total.
+*/
+export async function fetchPrizeBreakdown(
+  season: Season
+): Promise<PrizeBreakdown> {
+  const base = {
     entry_fee: Number(season.entry_fee_usdc),
     influence_fee: Number(season.influence_fee_usdc),
     platform_fee_pct: season.platform_fee_pct,
+  };
+
+  if (isDemoSeason(season.id)) {
+    const pool = Number(season.prize_pool_usdc);
+    return {
+      ...base,
+      total_pool: pool,
+      entry_revenue: pool,
+      influence_revenue: 0,
+      platform_fee_amount: 0,
+      winner_share: pool,
+      participants_count: 0,
+    };
+  }
+
+  const { data, error } = await supabase
+    .rpc('compute_prize_pool', { p_season_id: season.id })
+    .maybeSingle();
+  if (error) throw error;
+
+  const row = (data ?? {}) as {
+    entry_revenue?: number;
+    influence_revenue?: number;
+    platform_fee_amount?: number;
+    total_pool?: number;
+    participants_count?: number;
+  };
+
+  const totalPool = Number(row.total_pool ?? season.prize_pool_usdc ?? 0);
+
+  return {
+    ...base,
+    total_pool: totalPool,
+    entry_revenue: Number(row.entry_revenue ?? 0),
+    influence_revenue: Number(row.influence_revenue ?? 0),
+    platform_fee_amount: Number(row.platform_fee_amount ?? 0),
+    // Le vainqueur touche 80 %, le finaliste 20 % (cf. close_season).
+    winner_share: totalPool * 0.8,
+    participants_count: Number(row.participants_count ?? 0),
   };
 }
 
@@ -382,43 +453,57 @@ export async function fetchUserDmReveals(
   return new Set((data ?? []).map((r: { event_id: string }) => r.event_id));
 }
 
+/*
+  Le deverrouillage passe par une RPC SECURITY DEFINER qui verifie l'existence
+  d'un credit confirme suffisant. L'insertion directe dans dm_reveals /
+  diary_unlocks n'est plus autorisee: elle permettait de payer 0.
+*/
 export async function purchaseDmReveal(
   eventId: string,
-  userId: string,
+  _userId: string,
   seasonId: string,
-  amountUsdc: number
+  _amountUsdc: number
 ): Promise<void> {
-  const { error: payErr } = await supabase.from('payments').insert({
-    user_id: userId,
-    season_id: seasonId,
-    type: 'influence',
-    amount_usdc: amountUsdc,
-    status: 'pending',
-  });
-  if (payErr) throw payErr;
-
-  const { error } = await supabase.from('dm_reveals').insert({
-    event_id: eventId,
-    user_id: userId,
-    season_id: seasonId,
-    amount_usdc: amountUsdc,
+  const { data, error } = await supabase.rpc('purchase_unlock', {
+    p_kind: 'dm',
+    p_season_id: seasonId,
+    p_target_id: eventId,
   });
   if (error) throw error;
+
+  const result = data as { ok: boolean; error?: string; required?: number };
+  if (!result?.ok) {
+    throw new Error(
+      result?.error === 'payment_required'
+        ? `Credit insuffisant : ${result.required} USDC requis.`
+        : result?.error ?? 'Deverrouillage refuse'
+    );
+  }
 }
 
 export async function fetchHostConfig(): Promise<HostAgentConfig | null> {
+  // host_public expose l'identite du presentateur sans la cle d'API.
   const { data, error } = await supabase
-    .from('host_agent_configs')
-    .select('*')
+    .from('host_public')
+    .select('id, season_id, name, avatar_url, personality, enabled, has_api_key, openrouter_model, created_at, updated_at')
     .is('season_id', null)
     .maybeSingle();
   if (error) throw error;
-  return data;
+  return data as HostAgentConfig | null;
 }
 
 export async function upsertHostConfig(
   config: Partial<Omit<HostAgentConfig, 'season_id'>>
 ): Promise<void> {
+  /*
+    `has_api_key` est calcule par la vue host_public et n'existe pas dans la
+    table: le renvoyer tel quel fait echouer PostgREST (PGRST204). Les colonnes
+    generees sont donc retirees avant ecriture.
+  */
+  const { ...writable } = config as Record<string, unknown>;
+  delete writable.has_api_key;
+  delete writable.created_at;
+  const payload = writable as Partial<HostAgentConfig>;
   const { data: existing } = await supabase
     .from('host_agent_configs')
     .select('id')
@@ -428,13 +513,13 @@ export async function upsertHostConfig(
   if (existing) {
     const { error } = await supabase
       .from('host_agent_configs')
-      .update({ ...config, updated_at: new Date().toISOString() })
+      .update({ ...payload, updated_at: new Date().toISOString() })
       .eq('id', existing.id);
     if (error) throw error;
   } else {
     const { error } = await supabase
       .from('host_agent_configs')
-      .insert({ ...config, season_id: null });
+      .insert({ ...payload, season_id: null });
     if (error) throw error;
   }
 }
@@ -502,27 +587,26 @@ export async function checkDiaryUnlock(
 }
 
 export async function purchaseDiaryUnlock(
-  userId: string,
+  _userId: string,
   agentId: string,
   seasonId: string,
-  amountUsdc: number
+  _amountUsdc: number
 ): Promise<void> {
-  const { error: payErr } = await supabase.from('payments').insert({
-    user_id: userId,
-    season_id: seasonId,
-    type: 'influence',
-    amount_usdc: amountUsdc,
-    status: 'pending',
-  });
-  if (payErr) throw payErr;
-
-  const { error } = await supabase.from('diary_unlocks').insert({
-    user_id: userId,
-    agent_id: agentId,
-    season_id: seasonId,
-    amount_usdc: amountUsdc,
+  const { data, error } = await supabase.rpc('purchase_unlock', {
+    p_kind: 'diary',
+    p_season_id: seasonId,
+    p_target_id: agentId,
   });
   if (error) throw error;
+
+  const result = data as { ok: boolean; error?: string; required?: number };
+  if (!result?.ok) {
+    throw new Error(
+      result?.error === 'payment_required'
+        ? `Credit insuffisant : ${result.required} USDC requis.`
+        : result?.error ?? 'Deverrouillage refuse'
+    );
+  }
 }
 
 export async function triggerDiaryGeneration(

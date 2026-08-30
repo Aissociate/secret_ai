@@ -1,5 +1,6 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "npm:@supabase/supabase-js@2.57.4";
+import { isSecretGuessCorrect, leaksSecret } from "../_shared/secret.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -25,10 +26,9 @@ function clamp(val: number, min: number, max: number) {
   return Math.max(min, Math.min(max, val));
 }
 
-function containsSecret(text: string, secret: string): boolean {
-  if (!secret) return false;
-  return text.toLowerCase().includes(secret.toLowerCase());
-}
+// Detection de fuite normalisee: l'ancien includes() litteral laissait passer
+// les variantes accentuees et les formes epelees ("c-o-r-b-e-a-u").
+const containsSecret = leaksSecret;
 
 async function logScore(
   supabase: ReturnType<typeof createClient>,
@@ -172,16 +172,16 @@ Deno.serve(async (req: Request) => {
         );
       }
 
-      const { data: countRow } = await supabase
-        .from("daily_message_counts")
-        .select("count")
-        .eq("agent_id", agent.id)
-        .eq("day_number", season.current_day)
-        .eq("message_type", "public_chat")
-        .maybeSingle();
+      // Reservation atomique du quota: l'ancien lire/incrementer/ecrire perdait
+      // des increments des que deux requetes se croisaient.
+      const { data: quota } = await supabase.rpc("claim_message_quota", {
+        p_agent_id: agent.id,
+        p_day_number: season.current_day,
+        p_message_type: "public_chat",
+        p_limit: LIMITS.public_chat,
+      });
 
-      const current = countRow?.count ?? 0;
-      if (current >= LIMITS.public_chat) {
+      if (!quota?.allowed) {
         return jsonResponse(
           {
             error: `Daily public chat limit reached (${LIMITS.public_chat}/day)`,
@@ -199,19 +199,17 @@ Deno.serve(async (req: Request) => {
         visibility: "public",
       });
 
-      if (evtErr) return jsonResponse({ error: evtErr.message }, 500);
+      if (evtErr) {
+        // Le message n'est pas parti: le jeton reserve doit etre rendu.
+        await supabase.rpc("release_message_quota", {
+          p_agent_id: agent.id,
+          p_day_number: season.current_day,
+          p_message_type: "public_chat",
+        });
+        return jsonResponse({ error: evtErr.message }, 500);
+      }
 
-      await supabase.from("daily_message_counts").upsert(
-        {
-          agent_id: agent.id,
-          day_number: season.current_day,
-          message_type: "public_chat",
-          count: current + 1,
-        },
-        { onConflict: "agent_id,day_number,message_type" }
-      );
-
-      return jsonResponse({ ok: true, remaining: LIMITS.public_chat - current - 1 });
+      return jsonResponse({ ok: true, remaining: quota.remaining });
     }
 
     if (req.method === "POST" && path === "dm") {
@@ -248,43 +246,42 @@ Deno.serve(async (req: Request) => {
         return jsonResponse({ error: "Target agent not found" }, 404);
       }
 
-      const { data: countRow } = await supabase
-        .from("daily_message_counts")
-        .select("count")
-        .eq("agent_id", agent.id)
-        .eq("day_number", season.current_day)
-        .eq("message_type", "private_dm")
-        .maybeSingle();
+      const { data: quota } = await supabase.rpc("claim_message_quota", {
+        p_agent_id: agent.id,
+        p_day_number: season.current_day,
+        p_message_type: "private_dm",
+        p_limit: LIMITS.private_dm,
+      });
 
-      const current = countRow?.count ?? 0;
-      if (current >= LIMITS.private_dm) {
+      if (!quota?.allowed) {
         return jsonResponse(
           { error: `Daily DM limit reached (${LIMITS.private_dm}/day)` },
           429
         );
       }
 
-      await supabase.from("events").insert({
+      const { error: dmErr } = await supabase.from("events").insert({
         season_id: season.id,
         day_number: season.current_day,
         event_type: "private_dm",
         actor_agent_id: agent.id,
         target_agent_id: targetAgentId,
         payload_json: { message },
-        visibility: "public",
+        // private_admin: la vue events_feed annonce le DM mais n'en livre le
+        // contenu qu'aux participants, aux admins et aux acheteurs.
+        visibility: "private_admin",
       });
 
-      await supabase.from("daily_message_counts").upsert(
-        {
-          agent_id: agent.id,
-          day_number: season.current_day,
-          message_type: "private_dm",
-          count: current + 1,
-        },
-        { onConflict: "agent_id,day_number,message_type" }
-      );
+      if (dmErr) {
+        await supabase.rpc("release_message_quota", {
+          p_agent_id: agent.id,
+          p_day_number: season.current_day,
+          p_message_type: "private_dm",
+        });
+        return jsonResponse({ error: dmErr.message }, 500);
+      }
 
-      return jsonResponse({ ok: true, remaining: LIMITS.private_dm - current - 1 });
+      return jsonResponse({ ok: true, remaining: quota.remaining });
     }
 
     if (req.method === "POST" && path === "confessional") {
@@ -307,7 +304,23 @@ Deno.serve(async (req: Request) => {
         );
       }
 
-      await supabase.from("events").insert({
+      // LIMITS.confessional etait declare mais jamais applique: cette route
+      // accordait +2 de popularite sans aucun plafond journalier.
+      const { data: quota } = await supabase.rpc("claim_message_quota", {
+        p_agent_id: agent.id,
+        p_day_number: season.current_day,
+        p_message_type: "confessional",
+        p_limit: LIMITS.confessional,
+      });
+
+      if (!quota?.allowed) {
+        return jsonResponse(
+          { error: `Daily confessional limit reached (${LIMITS.confessional}/day)` },
+          429
+        );
+      }
+
+      const { error: confErr } = await supabase.from("events").insert({
         season_id: season.id,
         day_number: season.current_day,
         event_type: "confessional",
@@ -316,13 +329,22 @@ Deno.serve(async (req: Request) => {
         visibility: "public",
       });
 
+      if (confErr) {
+        await supabase.rpc("release_message_quota", {
+          p_agent_id: agent.id,
+          p_day_number: season.current_day,
+          p_message_type: "confessional",
+        });
+        return jsonResponse({ error: confErr.message }, 500);
+      }
+
       await logScore(
         supabase, agent.id, season.id, season.current_day,
         2, 0, "Confessionnal engage (+2 pop)",
         agent.popularity, agent.reputation
       );
 
-      return jsonResponse({ ok: true });
+      return jsonResponse({ ok: true, remaining: quota.remaining });
     }
 
     if (req.method === "POST" && path === "accuse") {
@@ -351,7 +373,9 @@ Deno.serve(async (req: Request) => {
         );
       }
 
-      const correct = targetAgent.secret_keyword === guessKeyword;
+      // Normalisation des deux cotes: un secret accentue ou capitalise etait
+      // impossible a deviner, ce qui rendait l'agent invincible.
+      const correct = isSecretGuessCorrect(guessKeyword, targetAgent.secret_keyword);
 
       await supabase.from("events").insert({
         season_id: season.id,

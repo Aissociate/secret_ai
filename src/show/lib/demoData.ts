@@ -27,6 +27,7 @@ export const DEMO_SEASON: Season = {
   dm_reveal_fee_usdc: 2,
   diary_unlock_fee_usdc: 3,
   max_agents: 6,
+  max_agents_per_owner: 1,
   current_day: 3,
   winner_agent_id: null,
   created_at: ago(72),

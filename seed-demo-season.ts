@@ -34,7 +34,14 @@ type StoryEvent = {
   message: string;
 };
 
-type AgentMap = Record<string, any>;
+type AgentMap = Record<string, { id: string; name: string }>;
+
+/** Champs communs a tout evenement insere par le script. */
+type BaseEvent = {
+  season_id: string;
+  day_number: number;
+  created_at: string;
+};
 
 const AGENTS_DATA: AgentData[] = [
   {
@@ -271,7 +278,7 @@ function calculateEventTimestamp(day: number): string {
   return new Date(Date.now() - daysAgo * 24 * 60 * 60 * 1000 + randomHours * 60 * 60 * 1000).toISOString();
 }
 
-async function handlePublicChat(event: StoryEvent, agentsMap: AgentMap, baseEvent: any) {
+async function handlePublicChat(event: StoryEvent, agentsMap: AgentMap, baseEvent: BaseEvent) {
   const agent = agentsMap[event.agent];
   if (!agent) return;
 
@@ -284,7 +291,7 @@ async function handlePublicChat(event: StoryEvent, agentsMap: AgentMap, baseEven
   });
 }
 
-async function handleDM(event: StoryEvent, agentsMap: AgentMap, baseEvent: any) {
+async function handleDM(event: StoryEvent, agentsMap: AgentMap, baseEvent: BaseEvent) {
   const agent = agentsMap[event.agent];
   const targetAgent = agentsMap[event.target!];
   if (!agent || !targetAgent) return;
@@ -299,7 +306,7 @@ async function handleDM(event: StoryEvent, agentsMap: AgentMap, baseEvent: any) 
   });
 }
 
-async function handleConfessional(event: StoryEvent, agentsMap: AgentMap, baseEvent: any) {
+async function handleConfessional(event: StoryEvent, agentsMap: AgentMap, baseEvent: BaseEvent) {
   const agent = agentsMap[event.agent];
   if (!agent) return;
 
@@ -312,7 +319,7 @@ async function handleConfessional(event: StoryEvent, agentsMap: AgentMap, baseEv
   });
 }
 
-async function handleAccusation(event: StoryEvent, agentsMap: AgentMap, baseEvent: any) {
+async function handleAccusation(event: StoryEvent, agentsMap: AgentMap, baseEvent: BaseEvent) {
   const agent = agentsMap[event.agent];
   const targetAgent = agentsMap[event.target!];
   if (!agent || !targetAgent) return;
@@ -338,7 +345,7 @@ async function handleAccusation(event: StoryEvent, agentsMap: AgentMap, baseEven
   }
 }
 
-async function handleElimination(event: StoryEvent, baseEvent: any) {
+async function handleElimination(event: StoryEvent, baseEvent: BaseEvent) {
   await supabase.from('events').insert({
     ...baseEvent,
     event_type: 'elimination',
@@ -347,8 +354,11 @@ async function handleElimination(event: StoryEvent, baseEvent: any) {
   });
 }
 
-async function processEvent(event: StoryEvent, agentsMap: AgentMap, baseEvent: any) {
-  const handlers: Record<string, Function> = {
+async function processEvent(event: StoryEvent, agentsMap: AgentMap, baseEvent: BaseEvent) {
+  const handlers: Record<
+    string,
+    (event: StoryEvent, agentsMap: AgentMap, baseEvent: BaseEvent) => Promise<void>
+  > = {
     public_chat: handlePublicChat,
     dm: handleDM,
     confessional: handleConfessional,
@@ -416,7 +426,7 @@ async function addDiaryEntries(seasonId: string, agentsMap: AgentMap) {
   const insertPromises = entries
     .filter(entry => agentsMap[entry.agent])
     .map(entry =>
-      supabase.from('agent_diary_entries').insert({
+      supabase.from('diary_entries').insert({
         agent_id: agentsMap[entry.agent].id,
         season_id: seasonId,
         day_number: entry.day,
@@ -465,9 +475,9 @@ async function main() {
     console.log(`🏆 Gagnant: Raven`);
     console.log(`💰 Prize Pool: 1500 USDC`);
     console.log(`👥 6 agents (Aria, Raven, Blaze, Echo, Sage, Luna)`);
-    console.log(`📅 7 jours d\'action`);
+    console.log(`📅 7 jours d'action`);
     console.log(`💬 ${STORY_DAYS.reduce((sum, d) => sum + d.events.length, 0)} evenements`);
-    console.log(`\n🔗 Voir dans l\'app: http://localhost:5173/show/season/${season.id}`);
+    console.log(`\n🔗 Voir dans l'app: http://localhost:5173/show/season/${season.id}`);
     console.log('\n═══════════════════════════════════════════════════\n');
   } catch (error) {
     console.error('❌ Erreur lors de la generation:', error);

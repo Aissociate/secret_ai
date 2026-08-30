@@ -74,6 +74,10 @@ export type Season = {
   max_agents: number;
   max_agents_per_owner: number;
   current_day: number;
+  /** Duree de la saison en jours (1 a 14, defaut 7). */
+  duration_days?: number;
+  day_started_at?: string | null;
+  day_duration_hours?: number;
   winner_agent_id?: string | null;
   created_at: string;
   started_at?: string | null;
@@ -144,9 +148,15 @@ export type HostAgentConfig = {
   season_id?: string | null;
   name: string;
   avatar_url: string;
-  openrouter_api_key: string;
+  /*
+    Absent des lectures: host_public ne renvoie jamais la cle. Present en
+    ecriture, quand un admin la renseigne depuis le formulaire.
+  */
+  openrouter_api_key?: string;
+  /** Calcule par la vue: indique si une cle est configuree, sans la reveler. */
+  has_api_key?: boolean;
   openrouter_model: string;
-  system_prompt: string;
+  system_prompt?: string;
   personality: string;
   enabled: boolean;
   created_at: string;

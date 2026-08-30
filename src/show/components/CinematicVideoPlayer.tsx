@@ -13,6 +13,8 @@ interface VideoJob {
   scene_prompt: string;
 }
 
+const PENDING_STATUSES = ['pending', 'queuing', 'generating'];
+
 interface CinematicVideoPlayerProps {
   eventId: string;
   agentName: string;
@@ -32,49 +34,55 @@ export function CinematicVideoPlayer({
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    fetchVideoJob();
+    let cancelled = false;
+    let interval: ReturnType<typeof setInterval> | undefined;
 
-    const interval = setInterval(() => {
-      if (videoJob?.status && ['pending', 'queuing', 'generating'].includes(videoJob.status)) {
-        fetchVideoJob();
-      }
-    }, 5000);
+    async function fetchVideoJob(): Promise<string | null> {
+      try {
+        const { data: event, error: eventError } = await supabase
+          .from('events')
+          // Deux cles etrangeres relient events et video_jobs (events.video_job_id et
+          // video_jobs.event_id): sans nommer la contrainte, PostgREST refuse
+          // l'imbrication (PGRST201).
+          .select(
+            'video_job_id, video_jobs!events_video_job_id_fkey(id, status, video_url, watermark_video_url, error_message, scene_prompt)'
+          )
+          .eq('id', eventId)
+          .maybeSingle();
 
-    return () => clearInterval(interval);
-  }, [eventId, videoJob?.status]);
+        if (cancelled) return null;
 
-  async function fetchVideoJob() {
-    try {
-      const { data: event, error: eventError } = await supabase
-        .from('events')
-        .select('video_job_id')
-        .eq('id', eventId)
-        .maybeSingle();
+        if (eventError) {
+          setError(eventError.message);
+          setLoading(false);
+          return null;
+        }
 
-      if (eventError || !event?.video_job_id) {
+        const job = (event?.video_jobs ?? null) as VideoJob | null;
+        setVideoJob(job);
         setLoading(false);
-        return;
-      }
-
-      const { data: job, error: jobError } = await supabase
-        .from('video_jobs')
-        .select('*')
-        .eq('id', event.video_job_id)
-        .maybeSingle();
-
-      if (jobError) {
-        setError(jobError.message);
+        return job?.status ?? null;
+      } catch (err) {
+        if (cancelled) return null;
+        setError(err instanceof Error ? err.message : 'Unknown error');
         setLoading(false);
-        return;
+        return null;
       }
-
-      setVideoJob(job);
-      setLoading(false);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Unknown error');
-      setLoading(false);
     }
-  }
+
+    fetchVideoJob().then((status) => {
+      if (cancelled || !status || !PENDING_STATUSES.includes(status)) return;
+      interval = setInterval(async () => {
+        const next = await fetchVideoJob();
+        if (next && !PENDING_STATUSES.includes(next) && interval) clearInterval(interval);
+      }, 5000);
+    });
+
+    return () => {
+      cancelled = true;
+      if (interval) clearInterval(interval);
+    };
+  }, [eventId]);
 
   const toggleFullscreen = () => {
     setIsFullscreen(!isFullscreen);
@@ -84,6 +92,20 @@ export function CinematicVideoPlayer({
     return (
       <div className="flex items-center justify-center p-8 bg-white/[0.02] rounded-xl border border-white/[0.06]">
         <Loader2 className="w-6 h-6 text-white/40 animate-spin" />
+      </div>
+    );
+  }
+
+  if (error && !videoJob) {
+    return (
+      <div className="p-4 bg-red-500/[0.05] rounded-xl border border-red-500/20">
+        <div className="flex items-start gap-3">
+          <AlertCircle className="w-4 h-4 text-red-400 flex-shrink-0 mt-0.5" />
+          <div>
+            <p className="text-xs text-red-200/80">Impossible de charger la vidéo : {error}</p>
+            {fallbackText && <p className="text-xs text-white/50 mt-2 leading-relaxed">{fallbackText}</p>}
+          </div>
+        </div>
       </div>
     );
   }
@@ -127,7 +149,7 @@ export function CinematicVideoPlayer({
     );
   }
 
-  if (['pending', 'queuing', 'generating'].includes(videoJob.status)) {
+  if (PENDING_STATUSES.includes(videoJob.status)) {
     const statusLabels: { [key: string]: string } = {
       pending: 'En attente',
       queuing: 'En file d\'attente',

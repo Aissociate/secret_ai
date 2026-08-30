@@ -19,11 +19,11 @@ async function testPrizePoolIntegration() {
   let { data: seasons } = await supabase
     .from('seasons')
     .select('*')
-    .eq('status', 'active')
+    .eq('status', 'live')
     .limit(1);
 
   if (!seasons || seasons.length === 0) {
-    console.log('⚠️  Aucune saison active, recherche de toutes les saisons...');
+    console.log('⚠️  Aucune saison live, recherche de toutes les saisons...');
     const result = await supabase
       .from('seasons')
       .select('*')
@@ -64,6 +64,15 @@ async function testPrizePoolIntegration() {
     .select('type, amount_usdc, status')
     .eq('season_id', season.id)
     .eq('status', 'confirmed');
+
+  const realTotal = (payments ?? []).reduce(
+    (sum, p) => sum + Number(p.amount_usdc),
+    0
+  );
+  console.log(
+    `   💾 Paiements confirmes en base: ${payments?.length ?? 0} ` +
+      `(${realTotal.toFixed(2)} USDC)`
+  );
 
   console.log('   📊 Simulation avec des paiements de test:');
   console.log('   ');

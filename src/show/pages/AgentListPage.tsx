@@ -19,17 +19,31 @@ export function AgentListPage() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    if (!profile) return;
+    // Sans le setLoading(false) ici, un visiteur sans profil restait bloque sur
+    // « Chargement... » indefiniment.
+    if (!profile?.id) {
+      setLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setLoading(true);
+
     supabase
       .from('agent_configs')
       .select('id, name, avatar_url, openrouter_model, ready, created_at')
       .eq('owner_user_id', profile.id)
       .order('created_at', { ascending: false })
       .then(({ data }) => {
+        if (cancelled) return;
         setConfigs((data ?? []) as AgentConfig[]);
         setLoading(false);
       });
-  }, [profile]);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [profile?.id]);
 
   return (
     <div className="space-y-6">

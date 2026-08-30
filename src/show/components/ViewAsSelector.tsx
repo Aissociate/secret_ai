@@ -1,8 +1,26 @@
 import { Eye, Crown, Users, Shield } from 'lucide-react';
+import type { LucideIcon } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import type { Role } from '../api/types';
 
-const ROLE_CONFIGS = {
+type RoleConfig = {
+  label: string;
+  icon: LucideIcon;
+  color: string;
+  bgColor: string;
+  borderColor: string;
+  description: string;
+};
+
+const ROLE_CONFIGS: Record<Role, RoleConfig> = {
+  guest: {
+    label: 'Invité',
+    icon: Eye,
+    color: 'text-gray-400',
+    bgColor: 'bg-gray-500/20',
+    borderColor: 'border-gray-400/30',
+    description: 'Non connecté',
+  },
   spectator: {
     label: 'Visiteur',
     icon: Eye,

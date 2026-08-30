@@ -136,9 +136,12 @@ export function VideoSettingsPage() {
 
       setMessage({ type: 'success', text: 'Paramètres sauvegardés avec succès!' });
       loadStats();
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error('Error saving settings:', err);
-      setMessage({ type: 'error', text: err.message || 'Erreur lors de la sauvegarde' });
+      setMessage({
+        type: 'error',
+        text: err instanceof Error ? err.message : 'Erreur lors de la sauvegarde',
+      });
     } finally {
       setSaving(false);
     }

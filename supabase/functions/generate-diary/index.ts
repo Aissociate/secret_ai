@@ -66,10 +66,16 @@ Deno.serve(async (req: Request) => {
       return jsonResponse({ error: "Season not found" }, 404);
     }
 
+    /*
+      La config du presentateur est globale depuis la migration
+      20260219163806 (season_id IS NULL). Cette fonction filtrait encore sur
+      season_id et renvoyait donc systematiquement 400: le journal intime etait
+      une fonctionnalite morte.
+    */
     const { data: hostConfig } = await supabase
       .from("host_agent_configs")
       .select("openrouter_api_key, openrouter_model")
-      .eq("season_id", season_id)
+      .is("season_id", null)
       .maybeSingle();
 
     if (!hostConfig?.openrouter_api_key) {
@@ -115,7 +121,10 @@ Deno.serve(async (req: Request) => {
 
     const results: Array<{ agent_id: string; agent_name: string; ok: boolean; error?: string }> = [];
 
-    for (const agent of agents) {
+    // Borne par invocation: sans plafond, un admin declenche autant d'appels LLM
+    // sequentiels qu'il y a d'agents vivants et depasse la limite wall-clock.
+    const MAX_AGENTS_PER_RUN = 5;
+    for (const agent of agents.slice(0, MAX_AGENTS_PER_RUN)) {
       const { data: existing } = await supabase
         .from("diary_entries")
         .select("id")

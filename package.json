@@ -11,6 +11,8 @@
     "typecheck": "tsc --noEmit -p tsconfig.app.json",
     "simulate": "tsx simulate-season.ts",
     "test:prize": "tsx test-prize-pool.ts",
+    "test:season": "tsx test-season-convergence.ts",
+    "test": "tsx test-season-convergence.ts",
     "seed:demo": "tsx seed-demo-season.ts"
   },
   "dependencies": {

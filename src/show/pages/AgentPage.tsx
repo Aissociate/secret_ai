@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { ArrowLeft, RefreshCw, Video, Lock, Unlock, MessageSquare, Zap, Users, Trophy, DollarSign, BarChart3, BookOpen } from 'lucide-react';
-import { fetchAgent, fetchAgentEvents, fetchAgents, fetchSeason, fetchSeasonPayments, computePrizeBreakdown, fetchAgentMessageCounts } from '../api/client';
+import { fetchAgent, fetchAgentEvents, fetchAgents, fetchSeason, fetchSeasonPayments, fetchPrizeBreakdown, fetchAgentMessageCounts } from '../api/client';
 import type { Agent, AgentDetail, FeedEvent, Season, Payment, PrizeBreakdown, DailyMessageCount } from '../api/types';
 import { EarningsChart } from '../components/EarningsChart';
 import { CeremonyCountdown } from '../components/CeremonyCountdown';
@@ -112,6 +112,7 @@ export function AgentPage() {
   const [allAgents, setAllAgents] = useState<Agent[]>([]);
   const [agentEvents, setAgentEvents] = useState<FeedEvent[]>([]);
   const [season, setSeason] = useState<Season | null>(null);
+  const [breakdown, setBreakdown] = useState<PrizeBreakdown | null>(null);
   const [payments, setPayments] = useState<Payment[]>([]);
   const [selected, setSelected] = useState<FeedEvent | null>(null);
   const [tab, setTab] = useState<string>('story');
@@ -119,34 +120,53 @@ export function AgentPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [messageCounts, setMessageCounts] = useState<DailyMessageCount[]>([]);
 
-  async function loadData() {
-    try {
-      const [a, evts, agents, s, p] = await Promise.all([
-        fetchAgent(aid),
-        fetchAgentEvents(sid, aid),
-        fetchAgents(sid),
-        fetchSeason(sid),
-        fetchSeasonPayments(sid).catch(() => [] as Payment[]),
-      ]);
-      setAgent(a);
-      setAgentEvents(evts);
-      setAllAgents(agents);
-      setSeason(s);
-      setPayments(p);
+  const loadData = useCallback(
+    async (isActive: () => boolean = () => true) => {
+      try {
+        const [a, evts, agents, s, p] = await Promise.all([
+          fetchAgent(aid),
+          fetchAgentEvents(sid, aid),
+          fetchAgents(sid),
+          fetchSeason(sid),
+          // La RLS ne renvoie que les paiements du visiteur: c'est bien ce que
+          // le graphique « Gains & Participations » doit montrer.
+          fetchSeasonPayments(sid).catch(() => [] as Payment[]),
+        ]);
+        if (!isActive()) return;
+        setAgent(a);
+        setAgentEvents(evts);
+        setAllAgents(agents);
+        setSeason(s);
+        setPayments(p);
 
-      if (s) {
-        const counts = await fetchAgentMessageCounts(aid, s.current_day).catch(() => []);
-        setMessageCounts(counts);
+        if (s) {
+          const [counts, b] = await Promise.all([
+            fetchAgentMessageCounts(aid, s.current_day).catch(() => []),
+            fetchPrizeBreakdown(s).catch(() => null),
+          ]);
+          if (!isActive()) return;
+          setMessageCounts(counts);
+          setBreakdown(b);
+        }
+      } catch (e) {
+        console.error(e);
       }
-    } catch (e) {
-      console.error(e);
-    }
-  }
+    },
+    [aid, sid]
+  );
 
   useEffect(() => {
+    // Un flag d'annulation evite qu'une reponse en retard pour l'agent A
+    // n'ecrase l'etat apres navigation vers l'agent B.
+    let cancelled = false;
     setLoading(true);
-    loadData().finally(() => setLoading(false));
-  }, [sid, aid]);
+    loadData(() => !cancelled).finally(() => {
+      if (!cancelled) setLoading(false);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [loadData]);
 
   async function refresh() {
     setRefreshing(true);
@@ -186,11 +206,6 @@ export function AgentPage() {
       ),
     [agentEvents]
   );
-
-  const breakdown: PrizeBreakdown | null = useMemo(() => {
-    if (!season) return null;
-    return computePrizeBreakdown(season, payments);
-  }, [season, payments]);
 
   const nextThreshold = useMemo(() => {
     if (!agent) return '';

@@ -23,6 +23,25 @@ export default tseslint.config(
         'warn',
         { allowConstantExport: true },
       ],
+      // Convention: un underscore signale un parametre volontairement inutilise
+      // (signature imposee par un appelant, argument conserve pour la lisibilite).
+      '@typescript-eslint/no-unused-vars': [
+        'error',
+        {
+          argsIgnorePattern: '^_',
+          varsIgnorePattern: '^_',
+          caughtErrorsIgnorePattern: '^_',
+        },
+      ],
+    },
+  },
+  {
+    // Scripts de maintenance et fonctions Edge Deno: hors du bundle applicatif,
+    // ils manipulent des reponses d'API non typees.
+    files: ['*.ts', 'supabase/functions/**/*.ts'],
+    languageOptions: { globals: { ...globals.node } },
+    rules: {
+      '@typescript-eslint/no-explicit-any': 'warn',
     },
   }
 );

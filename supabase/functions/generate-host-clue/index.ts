@@ -1,45 +1,20 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "npm:@supabase/supabase-js@2.57.4";
+import { corsHeaders, jsonResponse } from "../_shared/cors.ts";
+import { requireCronSecret } from "../_shared/auth.ts";
+import { callLLM as callLLMShared } from "../_shared/llm.ts";
 
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Client-Info, Apikey",
-};
-
-function jsonResponse(body: unknown, status = 200) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
-  });
-}
-
-async function callLLM(apiKey: string, model: string, system: string, user: string): Promise<string> {
-  const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model,
-      messages: [
-        { role: "system", content: system },
-        { role: "user", content: user },
-      ],
-      temperature: 0.9,
-      max_tokens: 200,
-    }),
-  });
-  if (!res.ok) throw new Error(`LLM error ${res.status}: ${await res.text()}`);
-  const data = await res.json();
-  return data?.choices?.[0]?.message?.content?.trim() ?? "";
+function callLLM(apiKey: string, model: string, system: string, user: string): Promise<string> {
+  return callLLMShared(apiKey, model, system, user, { temperature: 0.9, maxTokens: 200 });
 }
 
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { status: 200, headers: corsHeaders });
   }
+
+  const denied = requireCronSecret(req);
+  if (denied) return denied;
 
   try {
     let mode = "random";

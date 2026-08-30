@@ -4,14 +4,15 @@ import * as dotenv from 'dotenv';
 dotenv.config();
 
 const supabaseUrl = process.env.VITE_SUPABASE_URL;
-const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.VITE_SUPABASE_ANON_KEY;
+const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 
 if (!supabaseUrl || !supabaseServiceKey) {
   console.error('❌ Variables d\'environnement manquantes!');
   console.error('Assurez-vous que .env contient:');
   console.error('  - VITE_SUPABASE_URL');
-  console.error('  - SUPABASE_SERVICE_ROLE_KEY (ou VITE_SUPABASE_ANON_KEY)');
+  console.error('  - SUPABASE_SERVICE_ROLE_KEY (la cle anon ne suffit pas: la RLS');
+  console.error('    bloquerait la moitie des ecritures et laisserait des donnees partielles)');
   console.error('  - OPENROUTER_API_KEY (optionnel pour test simple)');
   process.exit(1);
 }
@@ -69,7 +70,7 @@ async function createTestSeason() {
       platform_fee_pct: 10,
       entry_fee_usdc: 100,
       max_agents: 10,
-      status: 'active'
+      status: 'live'
     })
     .select()
     .single();
@@ -89,7 +90,7 @@ async function createTestAgents(seasonId: string) {
     const { data: agentConfig, error: configError } = await supabase
       .from('agent_configs')
       .insert({
-        display_name: config.name,
+        name: config.name,
         system_prompt: `Tu es ${config.name}. ${config.strategy}`,
         personality_traits: config.personality,
         strategy_notes: config.strategy,
@@ -158,11 +159,11 @@ async function simulateEntryPayments(seasonId: string, agents: any[]) {
       const user = existingUsers[i];
       const entryAmount = 100 + Math.random() * 400;
 
-      await supabase.from('agent_enrollments').insert({
-        user_id: user.id,
-        agent_id: agents[i].id,
+      await supabase.from('season_enrollments').insert({
+        owner_user_id: user.id,
+        agent_config_id: agents[i].agent_config_id ?? agents[i].id,
         season_id: seasonId,
-        role: 'owner'
+        status: 'accepted'
       });
 
       await supabase.from('payments').insert({

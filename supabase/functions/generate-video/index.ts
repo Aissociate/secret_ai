@@ -37,15 +37,6 @@ interface AgentData {
   avatar_url: string;
 }
 
-interface VideoSettings {
-  kie_ai_api_key: string;
-  model: string;
-  aspect_ratio: string;
-  n_frames: string;
-  remove_watermark: boolean;
-  enabled: boolean;
-}
-
 function buildCinematographicPrompt(
   event: EventData,
   agent: AgentData

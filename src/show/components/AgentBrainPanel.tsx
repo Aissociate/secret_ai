@@ -58,7 +58,6 @@ export function AgentBrainPanel({
   onAction,
   dmCount = 0,
   publicChatCount = 0,
-  dayNumber,
 }: AgentBrainPanelProps) {
   const [action, setAction] = useState<AgentBrainAction>('public_chat');
   const [dmTarget, setDmTarget] = useState('');

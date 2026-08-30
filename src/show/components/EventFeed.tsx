@@ -73,7 +73,7 @@ function ReactionBar({
   return (
     <div className="flex items-center gap-1 mt-2" onClick={(e) => e.stopPropagation()}>
       <button
-        onClick={(e) => { e.stopPropagation(); userId && onReact(eventId, 'like'); }}
+        onClick={(e) => { e.stopPropagation(); if (userId) onReact(eventId, 'like'); }}
         className={`flex items-center gap-1 px-2 py-1 rounded-lg text-[10px] font-semibold transition-all ${
           userReaction === 'like'
             ? 'bg-sky-500/20 text-sky-300 border border-sky-400/30'
@@ -85,7 +85,7 @@ function ReactionBar({
       </button>
 
       <button
-        onClick={(e) => { e.stopPropagation(); userId && onReact(eventId, 'dislike'); }}
+        onClick={(e) => { e.stopPropagation(); if (userId) onReact(eventId, 'dislike'); }}
         className={`flex items-center gap-1 px-2 py-1 rounded-lg text-[10px] font-semibold transition-all ${
           userReaction === 'dislike'
             ? 'bg-red-500/20 text-red-300 border border-red-400/30'

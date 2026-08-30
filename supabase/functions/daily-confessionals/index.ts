@@ -1,52 +1,12 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "npm:@supabase/supabase-js@2.57.4";
-
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Client-Info, Apikey",
-};
-
-function jsonResponse(body: unknown, status = 200) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
-  });
-}
+import { corsHeaders, jsonResponse } from "../_shared/cors.ts";
+import { requireCronSecret } from "../_shared/auth.ts";
+import { leaksSecret } from "../_shared/secret.ts";
+import { callLLM } from "../_shared/llm.ts";
 
 function clamp(v: number, min: number, max: number) {
   return Math.max(min, Math.min(max, v));
-}
-
-function sanitizeJson(raw: string): string {
-  const m = raw.match(/\{[\s\S]*\}/);
-  return m ? m[0] : raw;
-}
-
-function leaksSecret(text: string, secret: string): boolean {
-  return secret ? text.toLowerCase().includes(secret.toLowerCase()) : false;
-}
-
-async function callLLM(apiKey: string, model: string, system: string, user: string): Promise<string> {
-  const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model,
-      messages: [
-        { role: "system", content: system },
-        { role: "user", content: user },
-      ],
-      temperature: 0.9,
-      max_tokens: 600,
-    }),
-  });
-  if (!res.ok) throw new Error(`LLM error ${res.status}: ${await res.text()}`);
-  const data = await res.json();
-  return data?.choices?.[0]?.message?.content?.trim() ?? "";
 }
 
 function tryParseJson(raw: string): Record<string, unknown> {
@@ -62,6 +22,9 @@ Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { status: 200, headers: corsHeaders });
   }
+
+  const denied = requireCronSecret(req);
+  if (denied) return denied;
 
   try {
     const supabase = createClient(
@@ -182,7 +145,10 @@ Reponds UNIQUEMENT avec ce JSON:
 {"confessional": "<max 600 chars, theatral et revelateur>", "top_suspects": ["<nom1>", "<nom2>"], "mood": "<confident|worried|suspicious|excited>"}`;
 
         try {
-          const raw = await callLLM(apiKey, model, systemPrompt, userPrompt);
+          const raw = await callLLM(apiKey, model, systemPrompt, userPrompt, {
+            temperature: 0.9,
+            maxTokens: 600,
+          });
           const parsed = tryParseJson(raw);
           const confessional = (parsed.confessional as string ?? raw).slice(0, 600);
           if (leaksSecret(confessional, agent.secret_keyword)) {

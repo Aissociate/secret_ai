@@ -61,8 +61,14 @@ export function SeasonDraftPage() {
   useEffect(() => {
     loadData();
 
+    let redirectTimer: ReturnType<typeof setTimeout> | undefined;
+
+    /*
+      Le canal est nomme par utilisateur: un nom fixe entre en collision quand
+      deux montages coexistent (StrictMode en developpement).
+    */
     const channel = supabase
-      .channel('season-status-watch')
+      .channel(`season-status-watch-${profile?.id ?? 'anon'}`)
       .on(
         'postgres_changes',
         { event: 'UPDATE', schema: 'public', table: 'seasons' },
@@ -70,7 +76,7 @@ export function SeasonDraftPage() {
           const updated = payload.new as Season;
           if (updated.status === 'live') {
             setLaunchingId(updated.id);
-            setTimeout(() => {
+            redirectTimer = setTimeout(() => {
               navigate(`/show/${updated.id}/live`);
             }, 2000);
           }
@@ -82,9 +88,17 @@ export function SeasonDraftPage() {
       .subscribe();
 
     return () => {
+      // Sans ce clearTimeout, quitter la page pendant les 2 secondes de
+      // transition redirigeait l'utilisateur de force.
+      if (redirectTimer) clearTimeout(redirectTimer);
       supabase.removeChannel(channel);
     };
-  }, [profile]);
+    /*
+      Depend de l'identifiant, pas de l'objet `profile`: celui-ci est recree a
+      chaque TOKEN_REFRESHED (toutes les heures), ce qui reabonnait le canal et
+      relancait un loadData() complet sans raison.
+    */
+  }, [profile?.id]);
 
   async function loadData() {
     setLoading(true);

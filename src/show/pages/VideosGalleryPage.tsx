@@ -50,15 +50,24 @@ export function VideosGalleryPage() {
   async function loadData() {
     setLoading(true);
     try {
+      /*
+        La table `agents` n'est plus lisible directement (elle porte le secret et
+        la cle d'API): on passe par la vue agents_public. La jointure
+        `agent:agents!inner(...)` est soumise a la meme RLS et viderait la
+        galerie pour un spectateur, donc le nom et l'avatar sont rattaches
+        cote client depuis cette liste.
+      */
       const [seasonRes, agentsRes, videosRes] = await Promise.all([
         supabase.from('seasons').select('*').eq('id', sid).maybeSingle(),
-        supabase.from('agents').select('*').eq('season_id', sid),
+        supabase
+          .from('agents_public')
+          .select('id, name, avatar_url, alive, popularity, reputation, season_id')
+          .eq('season_id', sid),
         supabase
           .from('video_jobs')
           .select(`
             *,
-            event:events!inner(event_type, day_number, payload_json),
-            agent:agents!inner(name, avatar_url)
+            event:events!inner(event_type, day_number, payload_json)
           `)
           .eq('season_id', sid)
           .eq('status', 'success')
@@ -67,8 +76,18 @@ export function VideosGalleryPage() {
       ]);
 
       if (seasonRes.data) setSeason(seasonRes.data);
+
+      const agentList = agentsRes.data ?? [];
       if (agentsRes.data) setAgents(agentsRes.data);
-      if (videosRes.data) setVideos(videosRes.data as any);
+
+      if (videosRes.data) {
+        const byId = new Map(agentList.map((a) => [a.id, a]));
+        const withAgent = videosRes.data.map((v) => ({
+          ...v,
+          agent: byId.get(v.agent_id) ?? { name: 'Agent inconnu', avatar_url: '' },
+        }));
+        setVideos(withAgent as unknown as VideoJobWithDetails[]);
+      }
     } catch (err) {
       console.error('Error loading data:', err);
     } finally {

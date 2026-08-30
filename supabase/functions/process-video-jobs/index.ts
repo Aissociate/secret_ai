@@ -1,11 +1,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "npm:@supabase/supabase-js@2.57.4";
-
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Client-Info, Apikey",
-};
+import { corsHeaders } from "../_shared/cors.ts";
+import { requireCronSecret, type DB } from "../_shared/auth.ts";
 
 interface VideoJob {
   id: string;
@@ -16,7 +12,7 @@ interface VideoJob {
   season_id: string;
   event_id: string;
   agent_id: string;
-  cinematography_metadata: any;
+  cinematography_metadata: Record<string, unknown> | null;
 }
 
 interface VideoSettings {
@@ -25,10 +21,6 @@ interface VideoSettings {
   aspect_ratio: string;
   n_frames: string;
   remove_watermark: boolean;
-}
-
-interface AgentData {
-  avatar_url: string;
 }
 
 interface KieJobResponse {
@@ -46,7 +38,7 @@ interface KieJobResponse {
 async function processJob(
   job: VideoJob,
   settings: VideoSettings,
-  supabase: any
+  supabase: DB
 ): Promise<{ updated: boolean; newStatus: string }> {
   if (!job.task_id) {
     console.log(`Job ${job.id} has no task_id, skipping`);
@@ -79,7 +71,7 @@ async function processJob(
 
     const state = kieData.data.state;
     let newStatus = job.status;
-    const updateData: any = {};
+    const updateData: Record<string, unknown> = {};
 
     // Map Kie.ai states to our statuses
     switch (state) {
@@ -115,7 +107,7 @@ async function processJob(
         }
         break;
 
-      case "fail":
+      case "fail": {
         const errorMsg = `${kieData.data.failCode || "unknown"}: ${kieData.data.failMsg || "unknown error"}`;
 
         // Check if we should retry
@@ -190,6 +182,7 @@ async function processJob(
           newStatus = "fail";
         }
         break;
+      }
     }
 
     // Update the job if status changed
@@ -215,22 +208,30 @@ async function processJob(
   }
 }
 
+// Borne le travail d'une invocation: sans limite, un backlog de 200 jobs
+// declenche 200 appels HTTP sequentiels et depasse la limite wall-clock.
+const MAX_JOBS_PER_RUN = 25;
+const BATCH_SIZE = 5;
+
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { status: 200, headers: corsHeaders });
   }
+
+  const denied = requireCronSecret(req);
+  if (denied) return denied;
 
   try {
     const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
     const supabaseKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
     const supabase = createClient(supabaseUrl, supabaseKey);
 
-    // Fetch all pending/queuing/generating jobs
     const { data: jobs, error: jobsError } = await supabase
       .from("video_jobs")
       .select("*")
       .in("status", ["pending", "queuing", "generating"])
-      .order("created_at", { ascending: true });
+      .order("created_at", { ascending: true })
+      .limit(MAX_JOBS_PER_RUN);
 
     if (jobsError) {
       return new Response(
@@ -258,7 +259,7 @@ Deno.serve(async (req: Request) => {
     }
 
     let totalProcessed = 0;
-    const results: any[] = [];
+    const results: Array<Record<string, unknown>> = [];
 
     // Process jobs for each season
     for (const [seasonId, seasonJobs] of Object.entries(jobsByseason)) {
@@ -274,17 +275,32 @@ Deno.serve(async (req: Request) => {
         continue;
       }
 
-      // Process each job for this season
-      for (const job of seasonJobs) {
-        const result = await processJob(job, settings, supabase);
-        if (result.updated) {
-          totalProcessed++;
-        }
-        results.push({
-          job_id: job.id,
-          old_status: job.status,
-          new_status: result.newStatus,
-          updated: result.updated
+      // Traitement par lots: un job lent ne bloque plus toute la file.
+      for (let i = 0; i < seasonJobs.length; i += BATCH_SIZE) {
+        const batch = seasonJobs.slice(i, i + BATCH_SIZE);
+        const settled = await Promise.allSettled(
+          batch.map((job) => processJob(job, settings, supabase))
+        );
+
+        settled.forEach((outcome, idx) => {
+          const job = batch[idx];
+          if (outcome.status === "fulfilled") {
+            if (outcome.value.updated) totalProcessed++;
+            results.push({
+              job_id: job.id,
+              old_status: job.status,
+              new_status: outcome.value.newStatus,
+              updated: outcome.value.updated,
+            });
+          } else {
+            results.push({
+              job_id: job.id,
+              old_status: job.status,
+              new_status: job.status,
+              updated: false,
+              error: String(outcome.reason),
+            });
+          }
         });
       }
     }
@@ -294,6 +310,7 @@ Deno.serve(async (req: Request) => {
         message: `Processed ${totalProcessed} jobs`,
         total_jobs: jobs.length,
         processed: totalProcessed,
+        truncated: jobs.length === MAX_JOBS_PER_RUN,
         results
       }),
       { headers: { ...corsHeaders, "Content-Type": "application/json" } }

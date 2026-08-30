@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import { fetchAgents, fetchFeed, fetchSeason, fetchSeasonPayments, computePrizeBreakdown, fetchUserDmReveals, updateSeasonStatus } from '../api/client';
-import type { Agent, FeedEvent, Payment, PrizeBreakdown, Season } from '../api/types';
+import { fetchAgents, fetchFeed, fetchSeason, fetchPrizeBreakdown, fetchUserDmReveals, updateSeasonStatus, advanceSeasonDay } from '../api/client';
+import type { Agent, FeedEvent, PrizeBreakdown, Season } from '../api/types';
 import { DmRevealModal } from '../components/DmRevealModal';
 import { AgentGrid } from '../components/AgentGrid';
 import { EventFeed } from '../components/EventFeed';
@@ -12,7 +12,7 @@ import { DaySelector } from '../components/DaySelector';
 import { Tabs } from '../components/Tabs';
 import { SkeletonCard, SkeletonFeed } from '../components/Skeleton';
 import { useAuth } from '../context/AuthContext';
-import { Radio, Zap, MessageSquare, TrendingUp, Trophy, Eye, Users, Pause, Play } from 'lucide-react';
+import { Radio, Zap, MessageSquare, TrendingUp, Trophy, Eye, Users, Pause, Play, FastForward } from 'lucide-react';
 
 const filterTabs = [
   { key: 'all', label: 'Tout' },
@@ -38,7 +38,7 @@ export function LivePage() {
   const [season, setSeason] = useState<Season | null>(null);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [events, setEvents] = useState<FeedEvent[]>([]);
-  const [payments, setPayments] = useState<Payment[]>([]);
+  const [breakdown, setBreakdown] = useState<PrizeBreakdown | null>(null);
   const [selected, setSelected] = useState<FeedEvent | null>(null);
   const [filter, setFilter] = useState('all');
   const [dayFilter, setDayFilter] = useState<number | null>(null);
@@ -46,8 +46,55 @@ export function LivePage() {
   const [revealedDmIds, setRevealedDmIds] = useState<Set<string>>(new Set());
   const [dmRevealTarget, setDmRevealTarget] = useState<FeedEvent | null>(null);
   const [pausing, setPausing] = useState(false);
+  const [advancing, setAdvancing] = useState(false);
+  const [adminNotice, setAdminNotice] = useState<string | null>(null);
 
   const isAdmin = profile?.role === 'admin';
+
+  /*
+    Declenche manuellement la ceremonie de fin de journee. Le cron horaire fait
+    la meme chose quand la duree de journee est ecoulee; `force` permet a un
+    admin de derouler une saison sans attendre 24 h.
+  */
+  async function handleAdvanceDay() {
+    if (!season || advancing) return;
+    setAdvancing(true);
+    setAdminNotice(null);
+    try {
+      const res = await advanceSeasonDay(sid, true);
+
+      if (!res.ok) {
+        setAdminNotice(
+          res.skipped === 'not_live'
+            ? "La saison n'est pas en cours."
+            : res.skipped === 'locked'
+            ? 'Une progression est deja en cours, reessayez.'
+            : 'Progression impossible pour le moment.'
+        );
+        return;
+      }
+
+      if (res.winner_name) {
+        setAdminNotice(`Saison terminee. Vainqueur : ${res.winner_name}.`);
+      } else {
+        const out = res.eliminated ? ` ${res.eliminated} quitte l'aventure.` : '';
+        setAdminNotice(`Jour ${res.day}.${out}`);
+      }
+
+      const [s, a, feed] = await Promise.all([
+        fetchSeason(sid),
+        fetchAgents(sid),
+        fetchFeed(sid),
+      ]);
+      setSeason(s);
+      setAgents(a);
+      setEvents(feed.events);
+    } catch (e) {
+      setAdminNotice(e instanceof Error ? e.message : 'Erreur inattendue');
+    } finally {
+      setAdvancing(false);
+    }
+  }
 
   async function handleTogglePause() {
     if (!season || pausing) return;
@@ -62,15 +109,32 @@ export function LivePage() {
   }
 
   useEffect(() => {
+    let cancelled = false;
     setLoading(true);
     Promise.all([
-      fetchSeason(sid).then(setSeason),
-      fetchAgents(sid).then(setAgents),
-      fetchFeed(sid).then((d) => setEvents(d.events)),
-      fetchSeasonPayments(sid).then(setPayments).catch(() => setPayments([])),
+      fetchSeason(sid),
+      fetchAgents(sid),
+      fetchFeed(sid),
     ])
+      .then(async ([s, a, feed]) => {
+        if (cancelled) return;
+        setSeason(s);
+        setAgents(a);
+        setEvents(feed.events);
+        if (s) {
+          // La cagnotte est agregee en SQL: le client n'a acces qu'a ses
+          // propres paiements et ne peut donc pas la calculer lui-meme.
+          const b = await fetchPrizeBreakdown(s).catch(() => null);
+          if (!cancelled) setBreakdown(b);
+        }
+      })
       .catch(console.error)
-      .finally(() => setLoading(false));
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [sid]);
 
   useEffect(() => {
@@ -95,11 +159,6 @@ export function LivePage() {
     agents.forEach((a) => m.set(a.id, a));
     return m;
   }, [agents]);
-
-  const breakdown: PrizeBreakdown | null = useMemo(() => {
-    if (!season) return null;
-    return computePrizeBreakdown(season, payments);
-  }, [season, payments]);
 
   const winnerAgent = useMemo(() => {
     if (!season?.winner_agent_id) return null;
@@ -138,7 +197,7 @@ export function LivePage() {
               )}
               {season && (
                 <span className="text-[10px] font-semibold text-white/30 uppercase tracking-wider ml-1">
-                  Jour {season.current_day}/7
+                  Jour {season.current_day}/{season.duration_days ?? 7}
                 </span>
               )}
             </div>
@@ -190,6 +249,17 @@ export function LivePage() {
           </div>
 
           <div className="flex items-center gap-2 self-start">
+            {isAdmin && season && season.status === 'live' && (
+              <button
+                onClick={handleAdvanceDay}
+                disabled={advancing}
+                title="Declenche la ceremonie et passe au jour suivant"
+                className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-bold text-violet-300 bg-violet-500/10 border border-violet-400/20 hover:bg-violet-500/20 transition-all disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-400"
+              >
+                <FastForward className="w-4 h-4" />
+                {advancing ? 'Ceremonie...' : 'Jour suivant'}
+              </button>
+            )}
             {isAdmin && season && (season.status === 'live' || season.status === 'paused') && (
               <button
                 onClick={handleTogglePause}
@@ -219,6 +289,22 @@ export function LivePage() {
           </div>
         </div>
       </div>
+
+      {adminNotice && (
+        <div
+          role="status"
+          className="flex items-center justify-between gap-4 px-4 py-3 rounded-xl bg-violet-500/[0.07] border border-violet-400/20"
+        >
+          <p className="text-sm text-violet-200">{adminNotice}</p>
+          <button
+            onClick={() => setAdminNotice(null)}
+            aria-label="Masquer le message"
+            className="text-xs text-violet-300/60 hover:text-violet-200 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-400 rounded"
+          >
+            Fermer
+          </button>
+        </div>
+      )}
 
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
         <Tabs value={filter} onChange={setFilter} tabs={filterTabs} />

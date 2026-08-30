@@ -1,5 +1,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "npm:@supabase/supabase-js@2.57.4";
+import { requireCronSecret } from "../_shared/auth.ts";
+import { leaksSecret as leaksSecretShared } from "../_shared/secret.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -8,6 +10,14 @@ const corsHeaders = {
 };
 
 type DB = ReturnType<typeof createClient>;
+
+// Bornes de contexte: sans elles le prompt grossit avec toute l'historique de la
+// saison et le cout croit de facon quadratique a chaque tick.
+const RECENT_EVENTS_LIMIT = 30;
+const CONTEXT_EVENTS_LIMIT = 15;
+const MAX_MESSAGE_CHARS = 150;
+const MAX_SYSTEM_PROMPT_CHARS = 12000;
+const LLM_TIMEOUT_MS = 20000;
 
 function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -25,9 +35,7 @@ function sanitizeJson(raw: string): string {
   return m ? m[0] : raw;
 }
 
-function leaksSecret(text: string, secret: string): boolean {
-  return secret ? text.toLowerCase().includes(secret.toLowerCase()) : false;
-}
+const leaksSecret = leaksSecretShared;
 
 async function callLLM(
   apiKey: string,
@@ -35,25 +43,63 @@ async function callLLM(
   system: string,
   user: string
 ): Promise<string> {
-  const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model,
-      messages: [
-        { role: "system", content: system },
-        { role: "user", content: user },
-      ],
-      temperature: 0.85,
-      max_tokens: 500,
-    }),
-  });
-  if (!res.ok) throw new Error(`LLM error ${res.status}: ${await res.text()}`);
-  const data = await res.json();
-  return data?.choices?.[0]?.message?.content?.trim() ?? "";
+  if (system.length > MAX_SYSTEM_PROMPT_CHARS) {
+    throw new Error(
+      `System prompt trop long (${system.length} > ${MAX_SYSTEM_PROMPT_CHARS}), appel annule`
+    );
+  }
+
+  const maxAttempts = 3;
+  let lastError = "";
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    let res: Response;
+    try {
+      res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        signal: AbortSignal.timeout(LLM_TIMEOUT_MS),
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model,
+          messages: [
+            { role: "system", content: system },
+            { role: "user", content: user },
+          ],
+          temperature: 0.85,
+          max_tokens: 500,
+        }),
+      });
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err);
+      if (attempt === maxAttempts) throw new Error(`LLM injoignable: ${lastError}`);
+      await backoff(attempt, null);
+      continue;
+    }
+
+    if (res.ok) {
+      const data = await res.json();
+      return data?.choices?.[0]?.message?.content?.trim() ?? "";
+    }
+
+    lastError = `${res.status}: ${await res.text()}`;
+    const retryAfter = res.headers.get("Retry-After");
+    // Le body doit etre consomme (ci-dessus) sinon la connexion fuit entre deux essais.
+    const retriable = res.status === 429 || res.status >= 500;
+    if (!retriable || attempt === maxAttempts) throw new Error(`LLM error ${lastError}`);
+    await backoff(attempt, retryAfter);
+  }
+
+  throw new Error(`LLM error ${lastError}`);
+}
+
+async function backoff(attempt: number, retryAfter: string | null) {
+  const headerDelay = retryAfter ? Number(retryAfter) * 1000 : NaN;
+  const base = Number.isFinite(headerDelay) ? headerDelay : 2 ** attempt * 500;
+  const jitter = Math.random() * 250;
+  await new Promise((r) => setTimeout(r, Math.min(base + jitter, 8000)));
 }
 
 interface AgentFull {
@@ -164,10 +210,11 @@ async function buildAgentContext(
     .join("\n") || "(Aucun indice revele)";
 
   const recentMsgs = recentPublicEvents
+    .slice(0, CONTEXT_EVENTS_LIMIT)
     .map((e) => {
       const actor = nameMap.get(e.actor_agent_id as string) ?? "System";
       const msg = ((e.payload_json as Record<string, unknown>)?.message ?? "") as string;
-      return `[${e.event_type}] ${actor}: ${msg}`;
+      return `[${e.event_type}] ${actor}: ${msg.slice(0, MAX_MESSAGE_CHARS)}`;
     })
     .join("\n") || "(Aucun message)";
 
@@ -238,6 +285,25 @@ ${suspicionSummary}
 PRIZE POOL ACTUEL: ${totalPool.toFixed(0)} USDC - Le gagnant remporte tout.`;
 }
 
+/*
+  Enrobage de quota.
+
+  auto-tick tenait son propre compteur en recomptant `events`, independamment de
+  celui d'agent-api: un agent pouvait cumuler 20 messages via l'API et 20 de
+  plus via les ticks. Les deux chemins passent desormais par la meme RPC
+  atomique claim_message_quota.
+
+  La reservation a lieu AVANT l'appel LLM (inutile de payer une generation qu'on
+  ne pourra pas publier) et le jeton est rendu si l'action n'aboutit pas.
+*/
+const QUOTA_TYPE_BY_ACTION: Record<string, { type: string; limit: number }> = {
+  public_chat: { type: "public_chat", limit: 20 },
+  dm: { type: "private_dm", limit: 5 },
+  confessional: { type: "confessional", limit: 1 },
+};
+
+const SUCCESSFUL_ACTIONS = new Set(["public_chat", "dm", "confessional", "accusation"]);
+
 async function runAgentTick(
   supabase: DB,
   agent: AgentFull,
@@ -246,6 +312,56 @@ async function runAgentTick(
   allAgents: AgentFull[],
   recentPublicEvents: Record<string, unknown>[],
   todayCounts: Record<string, number>
+): Promise<string> {
+  const day = (season.current_day as number) ?? 1;
+  let claimed: string | null = null;
+
+  const release = async () => {
+    if (!claimed) return;
+    await supabase.rpc("release_message_quota", {
+      p_agent_id: agent.id,
+      p_day_number: day,
+      p_message_type: claimed,
+    });
+    claimed = null;
+  };
+
+  try {
+    const result = await runAgentTickInner(
+      supabase, agent, config, season, allAgents, recentPublicEvents, todayCounts,
+      async (action: string) => {
+        const q = QUOTA_TYPE_BY_ACTION[action];
+        if (!q) return true;
+        const { data } = await supabase.rpc("claim_message_quota", {
+          p_agent_id: agent.id,
+          p_day_number: day,
+          p_message_type: q.type,
+          p_limit: q.limit,
+        });
+        const allowed = (data as { allowed?: boolean } | null)?.allowed === true;
+        if (allowed) claimed = q.type;
+        return allowed;
+      }
+    );
+
+    // Toute issue autre qu'une action publiee rend le jeton.
+    if (!SUCCESSFUL_ACTIONS.has(result)) await release();
+    return result;
+  } catch (err) {
+    await release();
+    throw err;
+  }
+}
+
+async function runAgentTickInner(
+  supabase: DB,
+  agent: AgentFull,
+  config: AgentConfig,
+  season: Record<string, unknown>,
+  allAgents: AgentFull[],
+  recentPublicEvents: Record<string, unknown>[],
+  todayCounts: Record<string, number>,
+  claimQuota: (action: string) => Promise<boolean>
 ): Promise<string> {
   const apiKey = config.openrouter_api_key;
   const model = config.openrouter_model || "openai/gpt-4o-mini";
@@ -284,6 +400,8 @@ async function runAgentTick(
   } else {
     return "daily_limit_reached";
   }
+
+  if (!(await claimQuota(action))) return "daily_limit_reached";
 
   const contextSection = await buildAgentContext(
     supabase,
@@ -430,7 +548,10 @@ Reponds UNIQUEMENT avec ce JSON:
       actor_agent_id: agent.id,
       target_agent_id: target.id,
       payload_json: { message: dmMessage, intent: (parsed.intent as string) ?? "probe", auto: true },
-      visibility: "public",
+      // private_admin: la vue events_feed annonce le DM sans en livrer le
+      // contenu. auto-tick est le producteur principal de DM (cron 2 min):
+      // le laisser en "public" contournait entierement le paywall.
+      visibility: "private_admin",
     });
   }
 
@@ -575,9 +696,10 @@ async function runHostTick(
 
   const recentSummary = recentEvents
     .filter((e) => e.event_type !== "host_commentary")
+    .slice(0, CONTEXT_EVENTS_LIMIT)
     .map((e) => {
       const msg = ((e.payload_json as Record<string, unknown>)?.message ?? "") as string;
-      return `[${e.event_type}] ${msg}`;
+      return `[${e.event_type}] ${msg.slice(0, MAX_MESSAGE_CHARS)}`;
     })
     .join("\n");
 
@@ -642,6 +764,9 @@ Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { status: 200, headers: corsHeaders });
   }
+
+  const denied = requireCronSecret(req);
+  if (denied) return denied;
 
   try {
     const supabase = createClient(
@@ -711,7 +836,8 @@ Deno.serve(async (req: Request) => {
         .select("event_type, actor_agent_id, target_agent_id, payload_json, created_at")
         .eq("season_id", season.id)
         .eq("visibility", "public")
-        .order("created_at", { ascending: false });
+        .order("created_at", { ascending: false })
+        .limit(RECENT_EVENTS_LIMIT);
 
       const recentEventsArr = (recentEvents ?? []) as Record<string, unknown>[];
 
