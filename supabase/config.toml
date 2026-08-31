@@ -1,0 +1,53 @@
+# Configuration des fonctions Edge.
+#
+# verify_jwt = false pour les fonctions appelees par pg_cron: elles n'ont pas de
+# session utilisateur. La protection reelle est le secret partage X-Cron-Secret
+# verifie dans le code (voir _shared/auth.ts) — la cle anon ne protege rien
+# puisqu'elle est publique et presente dans le bundle front.
+
+[functions.auto-tick]
+verify_jwt = false
+
+[functions.daily-confessionals]
+verify_jwt = false
+
+[functions.generate-host-clue]
+verify_jwt = false
+
+[functions.process-video-jobs]
+verify_jwt = false
+
+[functions.advance-season]
+verify_jwt = false
+
+# Fonctions appelees depuis le navigateur: le JWT utilisateur est exige, et le
+# role est verifie dans le code.
+[functions.agent-brain]
+verify_jwt = true
+
+[functions.generate-avatar]
+verify_jwt = true
+
+[functions.generate-diary]
+verify_jwt = true
+
+[functions.generate-presentation]
+verify_jwt = true
+
+[functions.generate-secret]
+verify_jwt = true
+
+[functions.generate-video]
+verify_jwt = true
+
+[functions.host-agent]
+verify_jwt = true
+
+# agent-api utilise sa propre authentification par cle d'agent (X-Agent-Key).
+[functions.agent-api]
+verify_jwt = false
+
+# wallet-auth EMET la session: elle est forcement appelee sans JWT. Sa protection
+# est le nonce a usage unique et la verification de signature ECDSA.
+[functions.wallet-auth]
+verify_jwt = false
