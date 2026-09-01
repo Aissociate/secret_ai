@@ -104,44 +104,6 @@ async function fetchImageAsBytes(url: string): Promise<{ bytes: Uint8Array; mime
   return { bytes: new Uint8Array(buffer), mimeType };
 }
 
-/*
-  Le modele d'image etait ecrit en dur: `google/gemini-2.5-flash-image-preview`.
-  OpenRouter a retire ce nom — le catalogue reel importe le 2026-08-31 porte
-  `google/gemini-2.5-flash-image`, sans le suffixe — et repondait donc 404 a
-  chaque generation d'avatar. C'est la meme erreur que les identifiants de
-  modeles de chat ecrits de memoire, corrigee ailleurs mais jamais ici.
-
-  Plutot que de reecrire une constante qui se perimera a son tour, le modele se
-  lit dans le catalogue, que `sync-models` reimporte chaque nuit. Le repli
-  balaie les modeles d'image disponibles: chez OpenRouter, un modele capable de
-  rendre une image porte `image` dans son identifiant. C'est une heuristique sur
-  le nom, faute d'un indicateur de modalite dans le catalogue, mais elle ne peut
-  que designer un modele qui existe.
-*/
-const PREFERRED_IMAGE_MODEL = "google/gemini-2.5-flash-image";
-
-async function resolveImageModel(db: ReturnType<typeof createClient>): Promise<string> {
-  const { data: preferred } = await db
-    .from("llm_models")
-    .select("slug")
-    .eq("slug", PREFERRED_IMAGE_MODEL)
-    .eq("enabled", true)
-    .maybeSingle();
-  if (preferred?.slug) return preferred.slug as string;
-
-  const { data: alternatives } = await db
-    .from("llm_models")
-    .select("slug")
-    .like("slug", "%image%")
-    .eq("enabled", true)
-    .order("price_out_per_mtok")
-    .limit(1);
-  if (alternatives?.length) return alternatives[0].slug as string;
-
-  // Catalogue absent ou vide: on tente quand meme le modele attendu.
-  return PREFERRED_IMAGE_MODEL;
-}
-
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") return preflight();
 
@@ -154,13 +116,6 @@ Deno.serve(async (req: Request) => {
 
     const prompt = buildAvatarPrompt(sheet);
 
-    const supabase = createClient(
-      Deno.env.get("SUPABASE_URL")!,
-      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
-    );
-
-    const imageModel = await resolveImageModel(supabase);
-
     const orResponse = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -168,7 +123,7 @@ Deno.serve(async (req: Request) => {
         "Authorization": `Bearer ${openrouter_api_key}`,
       },
       body: JSON.stringify({
-        model: imageModel,
+        model: "google/gemini-2.5-flash-image-preview",
         messages: [
           {
             role: "user",
@@ -181,13 +136,7 @@ Deno.serve(async (req: Request) => {
 
     if (!orResponse.ok) {
       const errText = await orResponse.text();
-      return jsonResponse(
-        {
-          error: `OpenRouter a repondu ${orResponse.status} pour le modele ${imageModel}.`,
-          details: errText,
-        },
-        502
-      );
+      return jsonResponse({ error: `OpenRouter error: ${orResponse.status}`, details: errText }, 502);
     }
 
     const orData = await orResponse.json();
@@ -231,6 +180,11 @@ Deno.serve(async (req: Request) => {
         422
       );
     }
+
+    const supabase = createClient(
+      Deno.env.get("SUPABASE_URL")!,
+      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
+    );
 
     let bytes: Uint8Array;
     let mimeType: string;

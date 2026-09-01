@@ -42,7 +42,7 @@
 
   Sur un deploiement neuf, le catalogue maison n'apparait jamais: la section 3
   ne trouve alors aucun slug a rattacher et ne fait rien, tandis que les
-  sections 2, 4, 5, 6 et 7 restent utiles telles quelles.
+  sections 2, 4, 5 et 6 restent utiles telles quelles.
 */
 
 -- ---------------------------------------------------------------------------
@@ -557,19 +557,13 @@ CREATE INDEX IF NOT EXISTS idx_models_provider ON llm_models (provider, label);
 CREATE INDEX IF NOT EXISTS idx_models_free ON llm_models (is_free) WHERE enabled;
 
 -- ---------------------------------------------------------------------------
--- 4. Reamorcage des reglages vides ou perimes
+-- 4. Reamorcage des reglages vides
 -- ---------------------------------------------------------------------------
 
 /*
   La purge du catalogue a pu ramener les deux reglages a NULL. On les repose
   sur les memes criteres qu'a l'amorcage: le gratuit le plus large, et un
   modele economique mais correct en redaction.
-
-  Un reglage nul n'est pas le seul cas a reparer: il peut aussi designer un
-  modele encore present mais desactive. `sync-models` desactive chaque nuit
-  tout modele retire de chez OpenRouter, sans jamais le supprimer — des agents
-  y font reference — donc le cas se produira. `fallback_model()` filtre bien
-  sur `enabled`, mais le panneau afficherait un choix qui ne s'applique plus.
 */
 DO $$
 BEGIN
@@ -583,15 +577,13 @@ BEGIN
     WHERE is_free AND enabled AND (expires_at IS NULL OR expires_at > now()::date)
     ORDER BY context_length DESC, slug LIMIT 1
   )
-  WHERE free_model_slug IS NULL
-     OR free_model_slug NOT IN (SELECT slug FROM llm_models WHERE enabled);
+  WHERE free_model_slug IS NULL;
 
   UPDATE game_settings
   SET secret_model_slug = (
     SELECT slug FROM llm_models WHERE slug = 'openai/gpt-4o-mini' AND enabled
   )
-  WHERE secret_model_slug IS NULL
-     OR secret_model_slug NOT IN (SELECT slug FROM llm_models WHERE enabled);
+  WHERE secret_model_slug IS NULL;
 END $$;
 
 -- ---------------------------------------------------------------------------
@@ -864,21 +856,3 @@ CREATE TRIGGER trigger_classer_modele
 
 -- Application au catalogue deja en place.
 UPDATE llm_models SET price_out_per_mtok = price_out_per_mtok;
-
-
--- ---------------------------------------------------------------------------
--- 7. Suppression des fonctions d'outillage
--- ---------------------------------------------------------------------------
-
-/*
-  Ces deux fonctions n'apparaissent dans aucune migration: elles ont ete creees
-  directement en base par l'outillage qui applique les migrations.
-
-  `exec_raw_sql(text)` execute du SQL arbitraire. Selon les droits dont elle est
-  assortie, c'est un contournement complet de la RLS pour quiconque peut
-  l'appeler — et le catalogue comme les secrets sont derriere cette RLS. Rien
-  dans l'application ne l'utilise: elle n'a pas a survivre a la migration qui
-  s'en servait.
-*/
-DROP FUNCTION IF EXISTS exec_raw_sql(text);
-DROP FUNCTION IF EXISTS flush_model_staging();

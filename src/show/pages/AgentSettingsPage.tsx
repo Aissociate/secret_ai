@@ -4,7 +4,6 @@ import {Bot, Save, Trash2, ChevronLeft, Zap, Check, AlertCircle, Sparkles, Refre
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
 import { ImageUpload } from '../components/ImageUpload';
-import { ModelPicker, type PickerModel } from '../components/ModelPicker';
 import { errorMessage } from '../lib/errors';
 
 interface AgentConfig {
@@ -47,6 +46,34 @@ const DIALS: Array<{
   { key: 'trait_discretion',    label: 'Discretion',    low: 'En dit trop',            high: 'Ne confirme jamais rien' },
 ];
 
+type ModelOption = {
+  slug: string;
+  label: string;
+  provider: string;
+  tier: string;
+  blurb: string;
+  price_in_per_mtok: number;
+  price_out_per_mtok: number;
+};
+
+const TIER_LABEL: Record<string, string> = {
+  gratuit: 'Recrue — Gratuit',
+  economique: 'Soldat — Economique',
+  standard: 'Officier — Standard',
+  avance: 'General — Avance',
+  elite: 'Marechal — Elite',
+};
+
+const TIER_ORDER = ['gratuit', 'economique', 'standard', 'avance', 'elite'];
+
+const TIER_COLOR: Record<string, string> = {
+  gratuit: 'text-emerald-400 bg-emerald-400/10',
+  economique: 'text-sky-400 bg-sky-400/10',
+  standard: 'text-orange-400 bg-orange-400/10',
+  avance: 'text-rose-400 bg-rose-400/10',
+  elite: 'text-amber-300 bg-amber-300/10',
+};
+
 const EMPTY: AgentConfig = {
   id: '',
   name: '',
@@ -71,65 +98,6 @@ const EMPTY: AgentConfig = {
   ready: false,
 };
 
-/*
-  Une reponse d'erreur n'a pas toujours la forme attendue. La passerelle
-  Supabase repond `{ code, message }` quand une fonction n'est pas deployee, et
-  rien ne garantit meme que le corps soit du JSON. Ne lire que `data.error`
-  faisait donc tomber tous ces cas sur le meme « Erreur lors de la
-  generation. », qui ne disait pas quoi corriger.
-
-  `generate-secret` joint en plus, sur un 422, le motif de rejet de chacune de
-  ses quatre tentatives: c'est precisement ce qu'il faut lire pour savoir si le
-  modele derape ou si c'est la validation qui refuse ses mots.
-*/
-type FunctionErrorBody = {
-  error?: unknown;
-  message?: unknown;
-  details?: unknown;
-  rejected?: Array<{ word?: unknown; reason?: unknown }>;
-};
-
-async function readFunctionError(res: Response, fallback: string): Promise<string> {
-  if (res.status === 404) {
-    return "Fonction Edge introuvable (404): elle n'est pas deployee sur ce projet Supabase.";
-  }
-
-  const raw = await res.text();
-  let body: FunctionErrorBody | null = null;
-  try {
-    body = raw ? (JSON.parse(raw) as FunctionErrorBody) : null;
-  } catch {
-    body = null;
-  }
-
-  if (!body) {
-    const excerpt = raw.trim().slice(0, 160);
-    return excerpt
-      ? `${fallback} (HTTP ${res.status}) ${excerpt}`
-      : `${fallback} (HTTP ${res.status})`;
-  }
-
-  const parts: string[] = [];
-  const main =
-    typeof body.error === 'string' ? body.error
-    : typeof body.message === 'string' ? body.message
-    : '';
-  parts.push(main || `${fallback} (HTTP ${res.status})`);
-
-  if (Array.isArray(body.rejected) && body.rejected.length) {
-    const motifs = body.rejected
-      .map((r) => `${String(r.word ?? '?')} (${String(r.reason ?? '?')})`)
-      .join(', ');
-    parts.push(`Tentatives rejetees: ${motifs}.`);
-  }
-
-  if (typeof body.details === 'string' && body.details) {
-    parts.push(body.details.slice(0, 200));
-  }
-
-  return parts.join(' ');
-}
-
 export function AgentSettingsPage() {
   const { configId } = useParams();
   const navigate = useNavigate();
@@ -141,10 +109,9 @@ export function AgentSettingsPage() {
   const [deleting, setDeleting] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [generatingAvatar, setGeneratingAvatar] = useState(false);
-  const [models, setModels] = useState<PickerModel[]>([]);
+  const [models, setModels] = useState<ModelOption[]>([]);
   const [modelsLoading, setModelsLoading] = useState(true);
   const [modelsError, setModelsError] = useState<string | null>(null);
-  const [tokenMargin, setTokenMargin] = useState(3);
 
   const [msg, setMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
 
@@ -160,7 +127,7 @@ export function AgentSettingsPage() {
 
     supabase
       .from('llm_models')
-      .select('slug, label, provider, tier, blurb, is_free, context_length, price_in_per_mtok, price_out_per_mtok')
+      .select('slug, label, provider, tier, blurb, price_in_per_mtok, price_out_per_mtok')
       .eq('enabled', true)
       .order('sort_order')
       .then(({ data, error }) => {
@@ -174,35 +141,12 @@ export function AgentSettingsPage() {
         } else if (!data?.length) {
           setModelsError('Aucun modele actif dans le catalogue.');
         } else {
-          setModels(data as PickerModel[]);
+          setModels(data as ModelOption[]);
           setModelsError(null);
         }
         setModelsLoading(false);
       });
 
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  /*
-    La marge appliquee aux tarifs affiches vient du panneau d'administration.
-    Elle etait ecrite en dur — `price * 3` — au moment de l'affichage: modifier
-    `token_margin` ne changeait rien a ce que le proprietaire lisait avant de
-    choisir son modele. La lecture est ouverte a tous par la politique RLS des
-    reglages, et 3 reste le repli si le panneau n'est pas encore deploye.
-  */
-  useEffect(() => {
-    let cancelled = false;
-    supabase
-      .from('game_settings')
-      .select('token_margin')
-      .maybeSingle()
-      .then(({ data }) => {
-        if (cancelled) return;
-        const m = Number(data?.token_margin);
-        if (Number.isFinite(m) && m > 0) setTokenMargin(m);
-      });
     return () => {
       cancelled = true;
     };
@@ -337,11 +281,11 @@ export function AgentSettingsPage() {
           personality_traits: form.personality_traits || undefined,
         }),
       });
+      const data = await res.json();
       if (!res.ok) {
-        setMsg({ type: 'err', text: await readFunctionError(res, 'Erreur lors de la generation.') });
+        setMsg({ type: 'err', text: data.error || 'Erreur lors de la generation.' });
         return;
       }
-      const data = await res.json();
       setForm((prev) => ({
         ...prev,
         secret_keyword: data.secret_keyword,
@@ -403,14 +347,11 @@ export function AgentSettingsPage() {
           },
         }),
       });
+      const data = await res.json();
       if (!res.ok) {
-        setMsg({
-          type: 'err',
-          text: await readFunctionError(res, "Erreur lors de la generation de l'avatar."),
-        });
+        setMsg({ type: 'err', text: data.error || 'Erreur lors de la generation de l\'avatar.' });
         return;
       }
-      const data = await res.json();
       set('avatar_url', data.url);
       setMsg({ type: 'ok', text: 'Avatar genere avec succes. Pense a sauvegarder.' });
     } catch (err) {
@@ -579,16 +520,53 @@ export function AgentSettingsPage() {
             </div>
           )}
 
-          {!modelsLoading && models.length > 0 && (
-            <ModelPicker
-              models={models}
-              value={form.model_slug}
-              onChange={(slug) => set('model_slug', slug)}
-              name="agent-model"
-              accent="orange"
-              margin={tokenMargin}
-            />
-          )}
+          <div className="space-y-5">
+            {TIER_ORDER.filter((t) => models.some((m) => m.tier === t)).map((tier) => (
+              <div key={tier}>
+                <h3 className={`text-xs font-bold uppercase tracking-wider mb-2 ${TIER_COLOR[tier]?.split(' ')[0] ?? 'text-white/50'}`}>
+                  {TIER_LABEL[tier] ?? tier}
+                </h3>
+                <div className="space-y-1.5">
+                  {models.filter((m) => m.tier === tier).map((m) => {
+                    const selected = form.model_slug === m.slug;
+                    return (
+                      <label
+                        key={m.slug}
+                        className={`flex items-start gap-3 p-3 rounded-xl border cursor-pointer transition-all ${
+                          selected
+                            ? 'border-orange-400/40 bg-orange-500/[0.07]'
+                            : 'border-white/[0.06] bg-white/[0.02] hover:border-white/[0.12]'
+                        }`}
+                      >
+                        <input
+                          type="radio"
+                          name="model"
+                          value={m.slug}
+                          checked={selected}
+                          onChange={() => set('model_slug', m.slug)}
+                          className="mt-1 accent-orange-400"
+                        />
+                        <span className="flex-1 min-w-0">
+                          <span className="flex items-center gap-2 flex-wrap">
+                            <span className="text-sm font-bold text-white">{m.label}</span>
+                            <span className={`text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded ${TIER_COLOR[m.tier] ?? 'bg-white/[0.06] text-white/40'}`}>
+                              {m.provider}
+                            </span>
+                          </span>
+                          <span className="block text-xs text-white/40 mt-0.5">{m.blurb}</span>
+                          <span className="block text-[11px] font-mono text-white/30 mt-1">
+                            {m.price_in_per_mtok === 0 && m.price_out_per_mtok === 0
+                              ? 'Gratuit'
+                              : `${(m.price_in_per_mtok * 3).toFixed(2)} / ${(m.price_out_per_mtok * 3).toFixed(2)} USDC/Mtok (entree / sortie)`}
+                          </span>
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+          </div>
         </section>
 
         {/* Comportement */}
