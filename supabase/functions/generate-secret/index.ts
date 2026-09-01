@@ -3,7 +3,12 @@ import { jsonResponse, preflight } from "../_shared/cors.ts";
 import { serviceClient } from "../_shared/auth.ts";
 import { callLLM, platformKey } from "../_shared/llm.ts";
 import { normalizeSecret } from "../_shared/secret.ts";
-import { drawSeed, buildSecretPrompt } from "../_shared/secretSeed.ts";
+import {
+  drawSeed,
+  drawIdentitySeed,
+  buildSecretPrompt,
+  type DialKey,
+} from "../_shared/secretSeed.ts";
 
 interface RequestBody {
   /*
@@ -15,6 +20,20 @@ interface RequestBody {
   personality_traits?: string;
   config_id?: string;
   season_id?: string;
+  /**
+   * Tire l'agent entier: nom, caractere, maniere de jouer et curseurs, en plus
+   * du secret. `agent_name` et `personality_traits` sont alors ignores, puisque
+   * c'est precisement ce qu'il s'agit d'inventer.
+   */
+  randomize_identity?: boolean;
+}
+
+interface GeneratedIdentity {
+  name?: string;
+  personality_traits?: string;
+  signature_style?: string;
+  taboo?: string;
+  strategy_notes?: string;
 }
 
 interface GeneratedSecret {
@@ -23,6 +42,12 @@ interface GeneratedSecret {
   hint_2: string;
   hint_3: string;
   presentation: string;
+  identity?: GeneratedIdentity;
+}
+
+/** Coupe un texte libre revenu du modele avant de le rendre au navigateur. */
+function trim(raw: unknown, max: number): string {
+  return typeof raw === "string" ? raw.trim().slice(0, max) : "";
 }
 
 /*
@@ -108,14 +133,22 @@ Deno.serve(async (req: Request) => {
         .slice(0, 20);
     }
 
+    /*
+      Le tirage d'identite est fait une fois, hors de la boucle: les curseurs et
+      les amorces ne doivent pas changer d'une tentative a l'autre, sinon le
+      personnage rendu ne serait pas celui dont le secret a ete valide.
+    */
+    const identitySeed = body.randomize_identity ? drawIdentitySeed() : undefined;
+
     const rejected: Array<{ word: string; reason: string }> = [];
 
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       const seed = drawSeed();
       const { system, user } = buildSecretPrompt(seed, {
         template: (settings?.secret_prompt as string | null) ?? undefined,
-        agentName: body.agent_name,
-        personality: body.personality_traits,
+        identity: identitySeed,
+        agentName: identitySeed ? undefined : body.agent_name,
+        personality: identitySeed ? undefined : body.personality_traits,
         directness,
         forbidden: [...forbidden, ...rejected.map((r) => r.word)],
       });
@@ -128,7 +161,8 @@ Deno.serve(async (req: Request) => {
       */
       const raw = await callLLM(platformKey(), providerModel, system, user, {
         temperature: 0.95,
-        maxTokens: 900,
+        // La fiche d'identite double a peu pres le volume attendu.
+        maxTokens: identitySeed ? 1600 : 900,
       });
 
       const match = raw.match(/\{[\s\S]*\}/);
@@ -153,6 +187,13 @@ Deno.serve(async (req: Request) => {
         continue;
       }
 
+      // Un agent sans nom n'est pas exploitable: on retente plutot que de rendre
+      // une fiche a moitie remplie que le proprietaire devrait completer.
+      if (identitySeed && !trim(generated.identity?.name, 30)) {
+        rejected.push({ word: generated.secret_keyword, reason: "identite_incomplete" });
+        continue;
+      }
+
       const word = normalizeSecret(generated.secret_keyword);
 
       // Un indice qui contient le mot le rend inutile.
@@ -174,8 +215,25 @@ Deno.serve(async (req: Request) => {
         continue;
       }
 
+      /*
+        Les curseurs rendus sont ceux tires par le serveur, jamais ceux que le
+        modele aurait pu glisser dans sa reponse: c'est le tirage qui porte la
+        variete, et le modele n'a fait que l'habiller.
+      */
+      const identity = identitySeed
+        ? {
+            name: trim(generated.identity?.name, 30),
+            personality_traits: trim(generated.identity?.personality_traits, 400),
+            signature_style: trim(generated.identity?.signature_style, 200),
+            taboo: trim(generated.identity?.taboo, 120),
+            strategy_notes: trim(generated.identity?.strategy_notes, 300),
+            ...(identitySeed.dials as Record<DialKey, number>),
+          }
+        : undefined;
+
       return jsonResponse({
         ...generated,
+        identity,
         secret_keyword: word,
         // Trace du tirage: utile pour diagnostiquer un domaine qui produirait
         // systematiquement des mots refuses.

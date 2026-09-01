@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useNavigate, useParams, Link } from 'react-router-dom';
-import {Bot, Save, Trash2, ChevronLeft, Zap, Check, AlertCircle, Sparkles, RefreshCw, Lock, ShieldQuestion, Wand2 } from 'lucide-react';
+import {Bot, Save, Trash2, ChevronLeft, Zap, Check, AlertCircle, Sparkles, RefreshCw, Lock, ShieldQuestion, Wand2, Shuffle } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
 import { ImageUpload } from '../components/ImageUpload';
@@ -141,6 +141,8 @@ export function AgentSettingsPage() {
   const [deleting, setDeleting] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [generatingAvatar, setGeneratingAvatar] = useState(false);
+  const [randomizing, setRandomizing] = useState(false);
+  const [confirmRandom, setConfirmRandom] = useState(false);
   const [models, setModels] = useState<PickerModel[]>([]);
   const [modelsLoading, setModelsLoading] = useState(true);
   const [modelsError, setModelsError] = useState<string | null>(null);
@@ -308,6 +310,81 @@ export function AgentSettingsPage() {
     await supabase.from('agent_configs').delete().eq('id', configId);
     setDeleting(false);
     navigate('/settings/agents');
+  }
+
+  /*
+    Tire l'agent entier. Le nom, le caractere, la maniere de jouer et les six
+    curseurs viennent du meme appel que le secret: un seul modele, une seule
+    facture, et surtout une fiche coherente — un caractere ecrit a part du
+    secret n'a aucune raison de s'accorder avec lui.
+
+    Les curseurs sont tires cote serveur et non demandes au modele: interroge,
+    il repond des valeurs sages groupees autour de 50, et toutes les IA se
+    ressemblent.
+  */
+  async function handleRandomAgent() {
+    const filled = Boolean(
+      form.name || form.personality_traits || form.secret_keyword || form.presentation
+    );
+    if (filled && !confirmRandom) {
+      setConfirmRandom(true);
+      return;
+    }
+    setConfirmRandom(false);
+    setMsg(null);
+    setRandomizing(true);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) {
+        setMsg({ type: 'err', text: 'Connectez-vous pour tirer un agent.' });
+        return;
+      }
+
+      const apiUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/generate-secret`;
+      const res = await fetch(apiUrl, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${session.access_token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ randomize_identity: true }),
+      });
+
+      if (!res.ok) {
+        setMsg({ type: 'err', text: await readFunctionError(res, "Erreur lors du tirage de l'agent.") });
+        return;
+      }
+
+      const data = await res.json();
+      const id = data.identity ?? {};
+      setForm((prev) => ({
+        ...prev,
+        name: id.name || prev.name,
+        personality_traits: id.personality_traits || prev.personality_traits,
+        signature_style: id.signature_style || prev.signature_style,
+        taboo: id.taboo || prev.taboo,
+        strategy_notes: id.strategy_notes || prev.strategy_notes,
+        trait_audace: id.trait_audace ?? prev.trait_audace,
+        trait_sociabilite: id.trait_sociabilite ?? prev.trait_sociabilite,
+        trait_expressivite: id.trait_expressivite ?? prev.trait_expressivite,
+        trait_introspection: id.trait_introspection ?? prev.trait_introspection,
+        trait_loyaute: id.trait_loyaute ?? prev.trait_loyaute,
+        trait_discretion: id.trait_discretion ?? prev.trait_discretion,
+        secret_keyword: data.secret_keyword,
+        hint_1: data.hint_1,
+        hint_2: data.hint_2,
+        hint_3: data.hint_3,
+        presentation: data.presentation,
+      }));
+      setMsg({
+        type: 'ok',
+        text: `${id.name || 'Agent'} est tiree au sort. Relis la fiche, genere son avatar, puis enregistre.`,
+      });
+    } catch (err) {
+      setMsg({ type: 'err', text: `Erreur reseau: ${err}` });
+    } finally {
+      setRandomizing(false);
+    }
   }
 
   async function handleGenerate() {
@@ -499,6 +576,61 @@ export function AgentSettingsPage() {
             />
             <span className="text-xs font-medium text-white/60">Prete</span>
           </label>
+        </div>
+
+        <div className="p-4 rounded-2xl border border-dashed border-fuchsia-400/25 bg-fuchsia-500/[0.04] space-y-3">
+          <div className="flex items-start gap-3">
+            <Shuffle className="w-5 h-5 text-fuchsia-300 flex-shrink-0 mt-0.5" />
+            <div className="min-w-0">
+              <p className="text-sm font-bold text-white/85">Agent aleatoire</p>
+              <p className="text-xs text-white/40 mt-0.5 leading-relaxed">
+                Le modele de generation invente tout d&apos;un coup : nom, caractere,
+                maniere de parler, curseurs de comportement, secret, indices et
+                presentation. Le caractere et le secret sortent du meme appel, donc
+                la fiche se tient. Cout de plateforme, jamais debite de ton solde.
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 flex-wrap">
+            <button
+              type="button"
+              onClick={handleRandomAgent}
+              disabled={randomizing || generating}
+              className={`flex items-center gap-2 px-4 py-2 rounded-xl border text-xs font-bold transition-all disabled:opacity-40 disabled:cursor-not-allowed ${
+                confirmRandom
+                  ? 'bg-amber-500/15 border-amber-400/30 text-amber-200 hover:bg-amber-500/25'
+                  : 'bg-fuchsia-500/12 border-fuchsia-400/25 text-fuchsia-200 hover:bg-fuchsia-500/20'
+              }`}
+            >
+              {randomizing ? (
+                <>
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                  Tirage en cours...
+                </>
+              ) : confirmRandom ? (
+                <>
+                  <AlertCircle className="w-3.5 h-3.5" />
+                  Confirmer : toute la fiche sera remplacee
+                </>
+              ) : (
+                <>
+                  <Shuffle className="w-3.5 h-3.5" />
+                  Tirer un agent au hasard
+                </>
+              )}
+            </button>
+
+            {confirmRandom && !randomizing && (
+              <button
+                type="button"
+                onClick={() => setConfirmRandom(false)}
+                className="px-3 py-2 rounded-xl text-xs text-white/40 hover:text-white/70 transition-colors"
+              >
+                Annuler
+              </button>
+            )}
+          </div>
         </div>
 
         {/* Identity */}
