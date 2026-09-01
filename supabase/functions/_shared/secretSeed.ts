@@ -82,18 +82,31 @@ export function drawSeed(): SecretSeed {
  */
 export function buildSecretPrompt(
   seed: SecretSeed,
-  opts: { agentName?: string; personality?: string; directness: 1 | 2; forbidden: string[] }
+  opts: {
+    /**
+     * Gabarit saisi dans le panneau d'administration, avec les marqueurs
+     * `{domaine}`, `{forme}`, `{interdits}` et `{indice3}`. Absent ou vide, la
+     * consigne integree ci-dessous prend le relais: un gabarit non renseigne
+     * ne doit pas empecher de jouer.
+     */
+    template?: string;
+    agentName?: string;
+    personality?: string;
+    directness: 1 | 2;
+    forbidden: string[];
+  }
 ): { system: string; user: string } {
   const thirdHint =
     opts.directness >= 2
       ? `- Indice 3 : oriente franchement. Peut nommer la categorie du mot, jamais le mot.`
       : `- Indice 3 : donne un detail concret et verifiable sur l'objet, sans nommer sa categorie ni sa fonction. Doit rester inutile a qui n'a pas compris les indices 1 et 2.`;
 
-  const forbidden = opts.forbidden.length
-    ? `\n\nMOTS INTERDITS (deja utilises, ne les propose sous aucune forme): ${opts.forbidden.join(", ")}.`
+  const forbiddenLine = opts.forbidden.length
+    ? `MOTS INTERDITS (deja utilises, ne les propose sous aucune forme): ${opts.forbidden.join(", ")}.`
     : "";
+  const forbidden = forbiddenLine ? `\n\n${forbiddenLine}` : "";
 
-  const system = `Tu es le maitre du jeu de "La Maison des Secrets". Chaque IA possede un MOT SECRET que les autres doivent deviner pour l'eliminer.
+  const builtIn = `Tu es le maitre du jeu de "La Maison des Secrets". Chaque IA possede un MOT SECRET que les autres doivent deviner pour l'eliminer.
 
 Le mot secret doit etre tire du domaine suivant: ${seed.domain}.
 Il doit respecter cette contrainte de forme: ${seed.shape}.
@@ -119,11 +132,40 @@ PRESENTATION (environ 400 caracteres):
 Reponds UNIQUEMENT en JSON valide, sans texte avant ni apres:
 {"secret_keyword":"lemot","hint_1":"...","hint_2":"...","hint_3":"...","presentation":"..."}`;
 
-  const user = opts.agentName
+  /*
+    Le gabarit du panneau l'emporte quand il est renseigne; sinon la consigne
+    integree. La version precedente exigeait le gabarit et repondait 503 sans
+    lui, ce qui rendait la generation tributaire d'un reglage facultatif.
+  */
+  const template = (opts.template ?? "").trim();
+  const system = template
+    ? template
+        .replaceAll("{domaine}", seed.domain)
+        .replaceAll("{forme}", seed.shape)
+        .replaceAll("{interdits}", forbiddenLine)
+        .replaceAll("{indice3}", thirdHint)
+    : builtIn;
+
+  /*
+    `secret_is_available` refuse tout mot de moins de 5 lettres. Ni la consigne
+    integree ni le gabarit d'origine ne le disaient, alors que la forme
+    « exactement deux syllabes » produit beaucoup de mots de quatre lettres:
+    chaque tirage malchanceux consommait une des quatre tentatives sans que le
+    modele puisse savoir pourquoi. La contrainte passe par le message
+    utilisateur pour valoir dans les deux cas, gabarit compris.
+  */
+  const lengthRule =
+    "Contrainte de validation non negociable: le mot doit compter au moins 5 lettres et au plus 24.";
+
+  const intro = opts.agentName
     ? `Genere le secret et les indices pour l'IA "${opts.agentName}"${
         opts.personality ? ` dont la personnalite est: ${opts.personality}` : ""
       }. La presentation doit coller a cette personnalite; le secret n'a pas a y etre lie.`
     : `Genere le secret et les indices pour une IA participante.`;
+
+  const user = `${intro}
+
+${lengthRule}`;
 
   return { system, user };
 }

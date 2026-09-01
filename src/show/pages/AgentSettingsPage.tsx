@@ -78,7 +78,7 @@ const EMPTY: AgentConfig = {
   id: '',
   name: '',
   avatar_url: '',
-  model_slug: 'eco-gemini',
+  model_slug: '',
   trait_audace: 50,
   trait_sociabilite: 50,
   trait_expressivite: 50,
@@ -168,6 +168,22 @@ export function AgentSettingsPage() {
         });
     }
   }, [configId, isNew]);
+
+  /*
+    `EMPTY` figeait le slug 'eco-gemini', issu du catalogue maison disparu avec
+    l'import du catalogue OpenRouter reel: a la creation aucun modele
+    n'apparaissait selectionne, et la config partait en base avec une reference
+    morte. Le defaut vient donc du catalogue lui-meme, et une reference devenue
+    invalide se repare a l'affichage.
+  */
+  useEffect(() => {
+    if (!models.length) return;
+    setForm((prev) =>
+      models.some((m) => m.slug === prev.model_slug)
+        ? prev
+        : { ...prev, model_slug: models[0].slug }
+    );
+  }, [models, form.model_slug]);
 
   function set<K extends keyof AgentConfig>(key: K, value: AgentConfig[K]) {
     setForm((prev) => ({ ...prev, [key]: value }));
@@ -259,7 +275,8 @@ export function AgentSettingsPage() {
         },
         body: JSON.stringify({
           // La cle est cote serveur: elle ne transite plus par le client.
-          model_slug: form.model_slug,
+          // Le modele de generation vient du panneau d'administration, pas du
+          // modele de jeu choisi ici: il n'a plus a etre transmis.
           agent_name: form.name || 'Agent',
           personality_traits: form.personality_traits || undefined,
         }),
@@ -306,9 +323,28 @@ export function AgentSettingsPage() {
           'Authorization': `Bearer ${session.access_token}`,
           'Content-Type': 'application/json',
         },
+        /*
+          L'avatar se dessine a partir de la fiche entiere — sauf le secret et
+          ses trois indices, qui n'ont rien a faire dans un portrait public.
+          L'omission est structurelle: les champs ne sont pas dans la charge
+          utile, et le serveur ignore ceux qu'il ne connait pas.
+        */
         body: JSON.stringify({
           agent_name: form.name,
+          presentation: form.presentation || undefined,
           personality_traits: form.personality_traits || undefined,
+          signature_style: form.signature_style || undefined,
+          taboo: form.taboo || undefined,
+          strategy_notes: form.strategy_notes || undefined,
+          system_prompt: form.system_prompt || undefined,
+          traits: {
+            audace: form.trait_audace,
+            sociabilite: form.trait_sociabilite,
+            expressivite: form.trait_expressivite,
+            introspection: form.trait_introspection,
+            loyaute: form.trait_loyaute,
+            discretion: form.trait_discretion,
+          },
         }),
       });
       const data = await res.json();

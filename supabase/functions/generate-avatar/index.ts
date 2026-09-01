@@ -1,18 +1,99 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-import { platformKey } from "../_shared/llm.ts";
+import { platformKey, sanitizeUserDirective } from "../_shared/llm.ts";
+import { jsonResponse, preflight } from "../_shared/cors.ts";
 import { createClient } from "npm:@supabase/supabase-js@2.57.4";
 
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Client-Info, Apikey",
+/*
+  La fiche telle qu'elle arrive du navigateur. Le secret et ses trois indices
+  n'y figurent pas et ne sont jamais lus: un portrait est public, et rien de ce
+  qui doit etre devine ne doit pouvoir s'y glisser. Les champs inconnus du
+  corps de la requete sont ignores plutot que repris en bloc, pour que l'ajout
+  d'un champ secret cote client ne puisse pas atteindre le modele.
+*/
+interface AvatarSheet {
+  agent_name?: string;
+  presentation?: string;
+  personality_traits?: string;
+  signature_style?: string;
+  taboo?: string;
+  strategy_notes?: string;
+  system_prompt?: string;
+  traits?: Partial<Record<DialKey, number>>;
+}
+
+type DialKey =
+  | "audace" | "sociabilite" | "expressivite"
+  | "introspection" | "loyaute" | "discretion";
+
+/*
+  Les curseurs de comportement portent l'essentiel du caractere de l'agent.
+  Traduits en indications visuelles, ils donnent au portrait ce que le seul nom
+  ne pouvait pas donner. Seules les valeurs franches comptent: au milieu, le
+  curseur ne dit rien et l'enumerer noierait le reste de la consigne.
+*/
+const DIAL_CUES: Record<DialKey, { low: string; high: string }> = {
+  audace:        { low: "guarded and wary posture",           high: "bold, defiant posture, chin raised" },
+  sociabilite:   { low: "solitary, keeping the world at arm's length", high: "warm and openly sociable presence" },
+  expressivite:  { low: "impassive, composed features",       high: "vivid, animated expression" },
+  introspection: { low: "outward, alert gaze",                high: "inward, contemplative gaze" },
+  loyaute:       { low: "a sly, calculating air",             high: "a steady, dependable air" },
+  discretion:    { low: "flamboyant, attention-seeking styling", high: "understated, restrained styling" },
 };
 
-function jsonResponse(body: unknown, status = 200) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
-  });
+const LOW = 35;
+const HIGH = 65;
+
+/** Coupe et neutralise un texte libre avant de l'inserer dans la consigne. */
+function clean(raw: string | undefined, maxChars: number): string {
+  return sanitizeUserDirective(raw ?? "", maxChars);
+}
+
+function buildAvatarPrompt(sheet: AvatarSheet): string {
+  const traits = sheet.traits ?? {};
+  const cues = (Object.keys(DIAL_CUES) as DialKey[])
+    .map((key) => {
+      const value = traits[key];
+      if (typeof value !== "number") return null;
+      if (value <= LOW) return DIAL_CUES[key].low;
+      if (value >= HIGH) return DIAL_CUES[key].high;
+      return null;
+    })
+    .filter((c): c is string => c !== null);
+
+  /*
+    Chaque element est borne separement: une presentation de 500 caracteres
+    recopiee telle quelle ecraserait les consignes de cadrage et de style, et
+    le modele rendrait une scene au lieu d'un portrait.
+  */
+  const lines = [
+    `Digital portrait avatar for an AI contestant named "${clean(sheet.agent_name, 60)}" in a futuristic reality TV show.`,
+  ];
+
+  const personality = clean(sheet.personality_traits, 240);
+  if (personality) lines.push(`Personality: ${personality}.`);
+
+  const presentation = clean(sheet.presentation, 300);
+  if (presentation) lines.push(`How they introduce themselves: ${presentation}`);
+
+  const signature = clean(sheet.signature_style, 160);
+  if (signature) lines.push(`Signature manner: ${signature}.`);
+
+  const taboo = clean(sheet.taboo, 120);
+  if (taboo) lines.push(`Never at ease with: ${taboo}.`);
+
+  const strategy = clean(sheet.strategy_notes, 160);
+  if (strategy) lines.push(`Plays the game like this: ${strategy}.`);
+
+  const system = clean(sheet.system_prompt, 200);
+  if (system) lines.push(`Directing idea: ${system}.`);
+
+  if (cues.length) lines.push(`Bearing: ${cues.join(", ")}.`);
+
+  lines.push(
+    "Cinematic, dramatic lighting, high-contrast, dark atmospheric background, bold character design, square format, face centered. No text, no lettering, no watermark."
+  );
+
+  return lines.join(" ");
 }
 
 async function fetchImageAsBytes(url: string): Promise<{ bytes: Uint8Array; mimeType: string }> {
@@ -24,19 +105,16 @@ async function fetchImageAsBytes(url: string): Promise<{ bytes: Uint8Array; mime
 }
 
 Deno.serve(async (req: Request) => {
-  if (req.method === "OPTIONS") {
-    return new Response(null, { status: 200, headers: corsHeaders });
-  }
+  if (req.method === "OPTIONS") return preflight();
 
   try {
-    const { agent_name, personality_traits } = await req.json();
+    const sheet: AvatarSheet = await req.json();
     // La cle ne transite plus par le corps de la requete.
     const openrouter_api_key = platformKey();
 
-    if (!agent_name) return jsonResponse({ error: "agent_name requis" }, 400);
+    if (!sheet.agent_name) return jsonResponse({ error: "agent_name requis" }, 400);
 
-    const personalityDesc = personality_traits ? ` ${personality_traits}.` : "";
-    const prompt = `Digital portrait avatar for an AI agent named "${agent_name}" in a futuristic reality TV show.${personalityDesc} Cinematic, dramatic lighting, high-contrast, dark atmospheric background, bold character design, square format, face centered.`;
+    const prompt = buildAvatarPrompt(sheet);
 
     const orResponse = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",

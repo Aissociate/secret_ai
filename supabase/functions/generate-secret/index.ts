@@ -6,8 +6,11 @@ import { normalizeSecret } from "../_shared/secret.ts";
 import { drawSeed, buildSecretPrompt } from "../_shared/secretSeed.ts";
 
 interface RequestBody {
-  /** Slug du catalogue; la cle vient de l'environnement. */
-  model_slug?: string;
+  /*
+    `model_slug` n'est plus lu: le modele de generation vient du panneau
+    d'administration, pas du modele de jeu du proprietaire. Le champ reste
+    tolere dans le corps de la requete pour les fronts en cache.
+  */
   agent_name?: string;
   personality_traits?: string;
   config_id?: string;
@@ -37,14 +40,30 @@ Deno.serve(async (req: Request) => {
     const db = serviceClient();
 
     /*
-      La generation est un cout de plateforme, pas une action de jeu: elle
-      passe par le palier economique quel que soit le modele choisi par le
-      proprietaire pour jouer, et n'est pas facturee a son solde.
+      Modele et gabarit viennent du panneau d'administration. La generation est
+      un cout de plateforme, pas une action de jeu: elle n'est pas facturee au
+      solde du proprietaire, et n'a donc pas a passer par le modele qu'il a
+      choisi pour jouer.
+
+      Le code lisait pourtant `body.model_slug`, contredisant le commentaire
+      qu'il portait. Deux consequences: le reglage « modele de generation » du
+      panneau ne commandait rien, et depuis le retour du catalogue OpenRouter
+      complet le proprietaire peut choisir un modele de raisonnement, dont les
+      jetons de reflexion epuisent `max_tokens` avant la reponse. Le contenu
+      revient alors vide, le JSON ne parse pas, et les quatre tentatives
+      echouent d'affilee. Le defaut `'rapide'` n'existait plus au catalogue
+      depuis l'import du catalogue reel.
     */
+    const { data: settings } = await db
+      .from("game_settings")
+      .select("secret_model_slug, secret_prompt, default_hint_directness")
+      .maybeSingle();
+
     const { data: genModel } = await db
       .from("llm_models")
       .select("provider_model")
-      .eq("slug", body.model_slug ?? "rapide")
+      .eq("slug", (settings?.secret_model_slug as string | null) ?? "openai/gpt-4o-mini")
+      .eq("enabled", true)
       .maybeSingle();
 
     const providerModel =
@@ -61,8 +80,9 @@ Deno.serve(async (req: Request) => {
       return jsonResponse({ error: "Authentification requise." }, 401);
     }
 
-    // Reglage de la saison quand il est connu, sinon le mode oblique.
-    let directness: 1 | 2 = 1;
+    // Reglage de la saison quand il est connu, sinon celui du panneau.
+    let directness: 1 | 2 =
+      (settings?.default_hint_directness as number) === 2 ? 2 : 1;
     if (body.season_id) {
       const { data: season } = await db
         .from("seasons")
@@ -93,15 +113,22 @@ Deno.serve(async (req: Request) => {
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       const seed = drawSeed();
       const { system, user } = buildSecretPrompt(seed, {
+        template: (settings?.secret_prompt as string | null) ?? undefined,
         agentName: body.agent_name,
         personality: body.personality_traits,
         directness,
         forbidden: [...forbidden, ...rejected.map((r) => r.word)],
       });
 
+      /*
+        Le JSON attendu porte un mot, trois indices et une presentation
+        d'environ 400 caracteres: entre 250 et 300 jetons en francais. La borne
+        a 500 ne laissait presque aucune marge, et un modele un peu bavard
+        rendait un JSON tronque, donc illisible.
+      */
       const raw = await callLLM(platformKey(), providerModel, system, user, {
         temperature: 0.95,
-        maxTokens: 500,
+        maxTokens: 900,
       });
 
       const match = raw.match(/\{[\s\S]*\}/);
