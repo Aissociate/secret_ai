@@ -46,21 +46,39 @@ const DIALS: Array<{
   { key: 'trait_discretion',    label: 'Discretion',    low: 'En dit trop',            high: 'Ne confirme jamais rien' },
 ];
 
-/** Catalogue de modeles, lu en base pour ne pas deriver du barème reel. */
 type ModelOption = {
   slug: string;
   label: string;
+  provider: string;
   tier: string;
   blurb: string;
   price_in_per_mtok: number;
   price_out_per_mtok: number;
 };
 
+const TIER_LABEL: Record<string, string> = {
+  gratuit: 'Recrue — Gratuit',
+  economique: 'Soldat — Economique',
+  standard: 'Officier — Standard',
+  avance: 'General — Avance',
+  elite: 'Marechal — Elite',
+};
+
+const TIER_ORDER = ['gratuit', 'economique', 'standard', 'avance', 'elite'];
+
+const TIER_COLOR: Record<string, string> = {
+  gratuit: 'text-emerald-400 bg-emerald-400/10',
+  economique: 'text-sky-400 bg-sky-400/10',
+  standard: 'text-orange-400 bg-orange-400/10',
+  avance: 'text-rose-400 bg-rose-400/10',
+  elite: 'text-amber-300 bg-amber-300/10',
+};
+
 const EMPTY: AgentConfig = {
   id: '',
   name: '',
   avatar_url: '',
-  model_slug: 'rapide',
+  model_slug: 'eco-gemini',
   trait_audace: 50,
   trait_sociabilite: 50,
   trait_expressivite: 50,
@@ -109,7 +127,7 @@ export function AgentSettingsPage() {
 
     supabase
       .from('llm_models')
-      .select('slug, label, tier, blurb, price_in_per_mtok, price_out_per_mtok')
+      .select('slug, label, provider, tier, blurb, price_in_per_mtok, price_out_per_mtok')
       .eq('enabled', true)
       .order('sort_order')
       .then(({ data, error }) => {
@@ -466,43 +484,52 @@ export function AgentSettingsPage() {
             </div>
           )}
 
-          <div className="space-y-2">
-            {models.map((m) => {
-              const selected = form.model_slug === m.slug;
-              return (
-                <label
-                  key={m.slug}
-                  className={`flex items-start gap-3 p-3 rounded-xl border cursor-pointer transition-all ${
-                    selected
-                      ? 'border-orange-400/40 bg-orange-500/[0.07]'
-                      : 'border-white/[0.06] bg-white/[0.02] hover:border-white/[0.12]'
-                  }`}
-                >
-                  <input
-                    type="radio"
-                    name="model"
-                    value={m.slug}
-                    checked={selected}
-                    onChange={() => set('model_slug', m.slug)}
-                    className="mt-1 accent-orange-400"
-                  />
-                  <span className="flex-1">
-                    <span className="flex items-center gap-2 flex-wrap">
-                      <span className="text-sm font-bold text-white">{m.label}</span>
-                      <span className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-white/[0.06] text-white/40">
-                        {m.tier}
-                      </span>
-                    </span>
-                    <span className="block text-xs text-white/40 mt-0.5">{m.blurb}</span>
-                    <span className="block text-[11px] font-mono text-white/30 mt-1">
-                      {m.price_in_per_mtok === 0 && m.price_out_per_mtok === 0
-                        ? 'Gratuit'
-                        : `${(m.price_in_per_mtok * 3).toFixed(2)} / ${(m.price_out_per_mtok * 3).toFixed(2)} USDC par million de tokens (entree / sortie)`}
-                    </span>
-                  </span>
-                </label>
-              );
-            })}
+          <div className="space-y-5">
+            {TIER_ORDER.filter((t) => models.some((m) => m.tier === t)).map((tier) => (
+              <div key={tier}>
+                <h3 className={`text-xs font-bold uppercase tracking-wider mb-2 ${TIER_COLOR[tier]?.split(' ')[0] ?? 'text-white/50'}`}>
+                  {TIER_LABEL[tier] ?? tier}
+                </h3>
+                <div className="space-y-1.5">
+                  {models.filter((m) => m.tier === tier).map((m) => {
+                    const selected = form.model_slug === m.slug;
+                    return (
+                      <label
+                        key={m.slug}
+                        className={`flex items-start gap-3 p-3 rounded-xl border cursor-pointer transition-all ${
+                          selected
+                            ? 'border-orange-400/40 bg-orange-500/[0.07]'
+                            : 'border-white/[0.06] bg-white/[0.02] hover:border-white/[0.12]'
+                        }`}
+                      >
+                        <input
+                          type="radio"
+                          name="model"
+                          value={m.slug}
+                          checked={selected}
+                          onChange={() => set('model_slug', m.slug)}
+                          className="mt-1 accent-orange-400"
+                        />
+                        <span className="flex-1 min-w-0">
+                          <span className="flex items-center gap-2 flex-wrap">
+                            <span className="text-sm font-bold text-white">{m.label}</span>
+                            <span className={`text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded ${TIER_COLOR[m.tier] ?? 'bg-white/[0.06] text-white/40'}`}>
+                              {m.provider}
+                            </span>
+                          </span>
+                          <span className="block text-xs text-white/40 mt-0.5">{m.blurb}</span>
+                          <span className="block text-[11px] font-mono text-white/30 mt-1">
+                            {m.price_in_per_mtok === 0 && m.price_out_per_mtok === 0
+                              ? 'Gratuit'
+                              : `${(m.price_in_per_mtok * 3).toFixed(2)} / ${(m.price_out_per_mtok * 3).toFixed(2)} USDC/Mtok (entree / sortie)`}
+                          </span>
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
           </div>
         </section>
 
