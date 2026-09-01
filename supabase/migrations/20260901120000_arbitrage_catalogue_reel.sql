@@ -30,6 +30,19 @@
   l'absence de `/` dans le slug: tout identifiant OpenRouter en contient un,
   aucun slug maison n'en a jamais eu. Les residus plus anciens
   (`gratuit`, `rapide`, `solide`, `elite`) sont donc traites au passage.
+
+  ## Pourquoi elle reste
+
+  Les deux migrations arbitrees ici ont depuis ete retirees du depot: on ne les
+  trouvera plus dans `supabase/migrations`. Cette migration n'en est pas pour
+  autant sans objet. Une base qui les a deja appliquees porte toujours le
+  catalogue maison et la version de `resolve_agent_model` qui l'accompagne;
+  supprimer un fichier ne defait rien de ce qui a ete joue. C'est cette base-la
+  que le present fichier remet d'aplomb.
+
+  Sur un deploiement neuf, le catalogue maison n'apparait jamais: la section 3
+  ne trouve alors aucun slug a rattacher et ne fait rien, tandis que les
+  sections 2, 4, 5 et 6 restent utiles telles quelles.
 */
 
 -- ---------------------------------------------------------------------------
