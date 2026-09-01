@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from 'react';
 import type { User, Session } from '@supabase/supabase-js';
-import { supabase } from '../lib/supabase';
+import { supabase, supabaseConfigError } from '../lib/supabase';
 import type { Role } from '../api/types';
 
 interface Profile {
@@ -18,6 +18,7 @@ interface Profile {
 type EditableProfile = Partial<Pick<Profile, 'username' | 'display_name' | 'wallet_address'>>;
 
 interface AuthState {
+  configError: string | null;
   user: User | null;
   session: Session | null;
   profile: Profile | null;
@@ -277,7 +278,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   return (
-    <AuthContext.Provider value={{ user, session, profile, loading, viewAsRole, effectiveRole, isAdmin, signUp, signIn, signInWithMetaMask, signOut, updateProfile, updatePassword, setViewAsRole }}>
+    <AuthContext.Provider value={{ configError: supabaseConfigError?.message ?? null, user, session, profile, loading, viewAsRole, effectiveRole, isAdmin, signUp, signIn, signInWithMetaMask, signOut, updateProfile, updatePassword, setViewAsRole }}>
       {children}
     </AuthContext.Provider>
   );

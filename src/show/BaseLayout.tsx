@@ -14,7 +14,7 @@ const navItems = [
 export function BaseLayout() {
   const location = useLocation();
   const navigate = useNavigate();
-  const { profile, signOut, effectiveRole } = useAuth();
+  const { profile, signOut, effectiveRole, configError } = useAuth();
   const [menuOpen, setMenuOpen] = useState(false);
   const [mobileNav, setMobileNav] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -194,6 +194,12 @@ export function BaseLayout() {
       </header>
 
       <main className="flex-1 max-w-5xl w-full mx-auto px-4 sm:px-6 py-8">
+        {configError && (
+          <div className="mb-6 p-4 rounded-xl border border-amber-400/30 bg-amber-500/10 text-sm text-amber-200">
+            <strong className="font-bold">Connexion a la base impossible.</strong>{' '}
+            {configError}
+          </div>
+        )}
         <Outlet />
       </main>
 
