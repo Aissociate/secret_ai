@@ -682,7 +682,17 @@ CREATE OR REPLACE FUNCTION auto_launch_season_when_full()
 RETURNS trigger
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = public, pg_temp
+/*
+  `extensions` est indispensable: le corps appelle `gen_random_bytes`, qui
+  appartient a pgcrypto et que Supabase range hors de `public`. L'omettre
+  faisait echouer tout lancement de saison sur « function gen_random_bytes
+  (integer) does not exist ». Un `search_path` non fixe reglerait le probleme
+  mais rouvrirait la faille que ce durcissement ferme.
+
+  `20260902090000_pgcrypto_search_path` relit ensuite le schema reel de
+  pgcrypto et corrige ce reglage si l'extension vit ailleurs.
+*/
+SET search_path = public, extensions, pg_temp
 AS $fn$
 DECLARE
   v_season         record;
