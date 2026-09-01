@@ -748,6 +748,19 @@ async function applyScoring(
   });
 }
 
+/*
+  Reservation de quota, identique a celle d'auto-tick et d'agent-api. Ce chemin
+  etait le seul des trois a ne pas la faire, et il vient d'etre ouvert a tout
+  proprietaire: sans plafond, enchainer les confessionnaux a +2 depuis le
+  panneau suffisait a monter a 95 dans la journee et a fabriquer le vainqueur.
+*/
+const QUOTA_TYPE_BY_ACTION: Record<string, string> = {
+  public_chat: "public_chat",
+  dm: "private_dm",
+  confessional: "confessional",
+  accusation: "accusation",
+};
+
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { status: 200, headers: corsHeaders });
@@ -840,25 +853,56 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    let result: Record<string, unknown>;
-
-    switch (action) {
-      case "public_chat":
-        result = await handlePublicChat(supabase, ctx, body);
-        break;
-      case "dm":
-        result = await handleDm(supabase, ctx, body);
-        break;
-      case "confessional":
-        result = await handleConfessional(supabase, ctx, body);
-        break;
-      case "accusation":
-        result = await handleAccusation(supabase, ctx, body);
-        break;
-      default:
-        return jsonResponse({ error: "Unknown action" }, 400);
+    const day = ((ctx.season as Record<string, unknown>).current_day as number) ?? 1;
+    const quotaType = QUOTA_TYPE_BY_ACTION[action];
+    const { data: quota } = await supabase.rpc("claim_quota", {
+      p_agent_id: agent_id,
+      p_day_number: day,
+      p_message_type: quotaType,
+    });
+    if ((quota as { allowed?: boolean } | null)?.allowed !== true) {
+      return jsonResponse(
+        { error: "daily_limit_reached", action, ...((quota as object) ?? {}) },
+        429
+      );
     }
+    // Une reservation sans action produite est rendue: sinon un appel LLM en
+    // echec consommerait le quota sans rien donner en retour.
+    const release = () =>
+      supabase.rpc("release_message_quota", {
+        p_agent_id: agent_id,
+        p_day_number: day,
+        p_message_type: quotaType,
+      });
 
+    let result: Record<string, unknown>;
+    try {
+      switch (action) {
+        case "public_chat":
+          result = await handlePublicChat(supabase, ctx, body);
+          break;
+        case "dm":
+          result = await handleDm(supabase, ctx, body);
+          break;
+        case "confessional":
+          result = await handleConfessional(supabase, ctx, body);
+          break;
+        case "accusation":
+          result = await handleAccusation(supabase, ctx, body);
+          break;
+        default:
+          await release();
+          return jsonResponse({ error: "Unknown action" }, 400);
+      }
+    } catch (err) {
+      await release();
+      throw err;
+    }
+    // Accusation refusee par la RPC (reputation trop basse, cible absente):
+    // rien ne s'est passe, le quota est rendu.
+    if (action === "accusation" && result.accused === false) {
+      await release();
+    }
     await applyScoring(supabase, ctx, action, result);
 
     return jsonResponse({ ok: true, action, ...result });

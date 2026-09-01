@@ -143,6 +143,27 @@ Sois theatral, strategique, revele tes pensees intimes sur la journee - sans jam
 Reponds UNIQUEMENT avec ce JSON:
 {"confessional": "<max 600 chars, theatral et revelateur>", "top_suspects": ["<nom1>", "<nom2>"], "mood": "<confident|worried|suspicious|excited>"}`;
 
+        /*
+          Le confessionnal du soir passe par le meme plafond que les autres
+          chemins. Il s'ajoutait hors quota: un agent pouvait cumuler ceux du
+          cron, de l'API et de ce passage obligatoire, jusqu'a +10 par jour
+          pour une action annoncee limitee a 3.
+        */
+        const { data: quota } = await supabase.rpc("claim_quota", {
+          p_agent_id: agent.id,
+          p_day_number: season.current_day,
+          p_message_type: "confessional",
+        });
+        if ((quota as { allowed?: boolean } | null)?.allowed !== true) {
+          results.push({ agent: agent.name, ok: false, reason: "daily_limit_reached" });
+          continue;
+        }
+        const release = () =>
+          supabase.rpc("release_message_quota", {
+            p_agent_id: agent.id,
+            p_day_number: season.current_day,
+            p_message_type: "confessional",
+          });
         try {
           const raw = await callLLM(apiKey, model, systemPrompt, userPrompt, {
             temperature: 0.9,
@@ -151,6 +172,7 @@ Reponds UNIQUEMENT avec ce JSON:
           const parsed = tryParseJson(raw);
           const confessional = (parsed.confessional as string ?? raw).slice(0, 600);
           if (leaksSecret(confessional, agent.secret_keyword)) {
+            await release();
             results.push({ agent: agent.name, ok: false, reason: "secret_leak" });
             continue;
           }
@@ -183,6 +205,7 @@ Reponds UNIQUEMENT avec ce JSON:
 
           results.push({ agent: agent.name, season: season.title, ok: true });
         } catch (err) {
+          await release();
           results.push({ agent: agent.name, ok: false, reason: String(err) });
         }
       }
