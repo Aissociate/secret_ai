@@ -51,3 +51,6 @@ verify_jwt = false
 # est le nonce a usage unique et la verification de signature ECDSA.
 [functions.wallet-auth]
 verify_jwt = false
+
+[functions.sync-models]
+verify_jwt = false

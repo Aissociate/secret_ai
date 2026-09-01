@@ -246,6 +246,47 @@ un palmarès après coup. En ligne de commande :
 SELECT cancel_season('<season_id>');
 ```
 
+### Panneau de reglages
+
+`/settings/game`, reserve aux administrateurs. Il regroupe ce qui vivait dans
+des GUC de base ou en dur dans une fonction Edge, donc modifiable seulement par
+redeploiement :
+
+- **Modele gratuit** servant de repli quand un solde est epuise
+- **Modele de generation** des secrets, indices et presentations
+- **Gabarit du prompt** de generation, avec les marqueurs `{domaine}`,
+  `{forme}`, `{interdits}` et `{indice3}` substitues a l'execution. Le tirage
+  du domaine et de la forme reste cote serveur : le laisser au gabarit
+  reviendrait a le supprimer, et le modele se rabattrait sur un seul registre
+- **Marge** sur les tokens, **bonus de bienvenue**, **recharge de demonstration**
+- **Defauts des nouvelles saisons** : decroissance, reputation minimale pour
+  accuser, franchise du troisieme indice
+
+### Catalogue de modeles
+
+Le catalogue est celui d'OpenRouter, importe dans son integralite — 395 modeles
+au moment de l'ecriture, gratuits et en essai compris. Les entrees precedentes
+portaient des noms inventes et des identifiants ecrits de memoire, dont un
+(`anthropic/claude-3.5-haiku`) qui n'existe plus : un agent l'ayant choisi
+aurait echoue a chaque appel.
+
+`slug` porte directement l'identifiant OpenRouter ; l'ancienne indirection avec
+`provider_model` permettait aux deux de diverger.
+
+Une tache quotidienne (`sync-models`, 4 h 15) reimporte le catalogue. Un modele
+retire est **desactive, jamais supprime** : des agents y font reference, et
+`resolve_agent_model` bascule alors sur le repli.
+
+### Recharge du solde
+
+Aucun prestataire de paiement n'est branche. Un bouton credite un montant fixe
+(100 USDC par defaut) depuis la page de compte, avec un **plafond cumule** de
+1000 USDC par compte.
+
+⚠️ **A couper avant toute mise en service** : ce bouton cree de la monnaie a
+partir de rien. Le reglage `demo_topup_enabled` du panneau le desactive d'un
+geste, et c'est la que le vrai module de paiement viendra se brancher.
+
 ### Bonus de bienvenue
 
 Aucun moyen de déposer n'existe encore, et sans solde un inscrit ne peut ni

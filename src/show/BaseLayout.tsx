@@ -1,6 +1,6 @@
 import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { useState, useRef, useEffect } from 'react';
-import { Eye, Calendar, Settings, User, LogOut, Menu, X, ChevronLeft, Bot } from 'lucide-react';
+import { Eye, Calendar, Settings, User, LogOut, Menu, X, ChevronLeft, Bot, Sliders } from 'lucide-react';
 import { useAuth } from './context/AuthContext';
 import { WalletPanel } from './components/WalletPanel';
 import { ViewAsSelector } from './components/ViewAsSelector';
@@ -9,6 +9,7 @@ const navItems = [
   { to: '/seasons', label: 'Saisons', icon: Calendar },
   { to: '/settings/agents', label: 'Mes IA', icon: Bot },
   { to: '/settings/account', label: 'Mon compte', icon: Settings },
+  { to: '/settings/game', label: 'Reglages du jeu', icon: Sliders },
 ];
 
 export function BaseLayout() {
@@ -38,6 +39,7 @@ export function BaseLayout() {
   const visibleNavItems = navItems.filter(({ to }) => {
     if (to === '/settings/agents' && effectiveRole !== 'owner' && effectiveRole !== 'admin') return false;
     if (to === '/settings/account' && !profile) return false;
+    if (to === '/settings/game' && effectiveRole !== 'admin') return false;
     return true;
   });
 

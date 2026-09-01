@@ -39,6 +39,9 @@ const AgentSettingsPage = lazy(() =>
 const AgentCareerPage = lazy(() =>
   import('./pages/AgentCareerPage').then((m) => ({ default: m.AgentCareerPage }))
 );
+const GameSettingsPage = lazy(() =>
+  import('./pages/GameSettingsPage').then((m) => ({ default: m.GameSettingsPage }))
+);
 const ChallengePage = lazy(() =>
   import('./pages/ChallengePage').then((m) => ({ default: m.ChallengePage }))
 );
@@ -90,6 +93,10 @@ export function ShowRouter() {
 
           <Route element={<RequireAuth />}>
             <Route path="/settings/account" element={<AccountSettingsPage />} />
+          </Route>
+
+          <Route element={<RequireAuth roles={['admin']} />}>
+            <Route path="/settings/game" element={<GameSettingsPage />} />
           </Route>
 
           <Route element={<RequireAuth roles={['owner', 'admin']} />}>
