@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Sliders, Save, ChevronLeft, AlertCircle, Check, RefreshCw, Search } from 'lucide-react';
+import { Sliders, Save, ChevronLeft, AlertCircle, Check, RefreshCw } from 'lucide-react';
+import { ModelPicker, type PickerModel } from '../components/ModelPicker';
 import { supabase } from '../lib/supabase';
 import { errorMessage } from '../lib/errors';
 
@@ -16,16 +17,6 @@ type Settings = {
   demo_topup_enabled: boolean;
   demo_topup_amount: number;
   demo_topup_cap: number;
-};
-
-type Model = {
-  slug: string;
-  label: string;
-  provider: string;
-  is_free: boolean;
-  price_in_per_mtok: number;
-  price_out_per_mtok: number;
-  context_length: number;
 };
 
 /** Marqueurs substitues a l'execution dans le gabarit de generation. */
@@ -70,90 +61,6 @@ function Field({
   );
 }
 
-function ModelPicker({
-  value,
-  onChange,
-  options,
-  filter,
-  onFilter,
-  label,
-  hint,
-}: {
-  value: string | null;
-  onChange: (slug: string) => void;
-  options: Model[];
-  filter: string;
-  onFilter: (v: string) => void;
-  label: string;
-  hint: string;
-}) {
-  const q = filter.trim().toLowerCase();
-  const shown = q
-    ? options.filter(
-        (m) => m.slug.toLowerCase().includes(q) || m.label.toLowerCase().includes(q)
-      )
-    : options;
-
-  return (
-    <div>
-      <label className="block text-xs font-semibold text-white/60 mb-1">{label}</label>
-      <p className="text-[11px] text-white/35 mb-2">{hint}</p>
-
-      <div className="relative mb-2">
-        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-white/25" />
-        <input
-          value={filter}
-          onChange={(e) => onFilter(e.target.value)}
-          placeholder={`Filtrer parmi ${options.length} modeles…`}
-          className="w-full pl-9 pr-3 py-2 rounded-xl bg-white/[0.04] border border-white/10 text-white text-sm placeholder:text-white/25 focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-400"
-        />
-      </div>
-
-      <div className="max-h-64 overflow-y-auto rounded-xl border border-white/[0.08] divide-y divide-white/[0.04]">
-        {shown.slice(0, 120).map((m) => (
-          <label
-            key={m.slug}
-            className={`flex items-start gap-3 p-2.5 cursor-pointer transition-colors ${
-              value === m.slug ? 'bg-teal-500/[0.1]' : 'hover:bg-white/[0.03]'
-            }`}
-          >
-            <input
-              type="radio"
-              checked={value === m.slug}
-              onChange={() => onChange(m.slug)}
-              className="mt-1 accent-teal-400"
-            />
-            <span className="flex-1 min-w-0">
-              <span className="block text-xs font-semibold text-white/85 truncate">
-                {m.label}
-              </span>
-              <span className="block text-[10px] font-mono text-white/30 truncate">
-                {m.slug}
-              </span>
-              <span className="block text-[10px] text-white/40 mt-0.5">
-                {m.is_free
-                  ? 'Gratuit'
-                  : `${m.price_in_per_mtok} / ${m.price_out_per_mtok} USD par Mtok`}
-                {m.context_length > 0 && ` · ${(m.context_length / 1000).toFixed(0)}k contexte`}
-              </span>
-            </span>
-          </label>
-        ))}
-
-        {shown.length === 0 && (
-          <p className="p-3 text-xs text-white/35">Aucun modele ne correspond.</p>
-        )}
-
-        {shown.length > 120 && (
-          <p className="p-2.5 text-[11px] text-white/30">
-            {shown.length - 120} autres — affinez le filtre.
-          </p>
-        )}
-      </div>
-    </div>
-  );
-}
-
 /**
  * Panneau d'administration des reglages du jeu.
  *
@@ -162,12 +69,10 @@ function ModelPicker({
  */
 export function GameSettingsPage() {
   const [settings, setSettings] = useState<Settings | null>(null);
-  const [models, setModels] = useState<Model[]>([]);
+  const [models, setModels] = useState<PickerModel[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
-  const [freeFilter, setFreeFilter] = useState('');
-  const [secretFilter, setSecretFilter] = useState('');
 
   useEffect(() => {
     let cancelled = false;
@@ -177,7 +82,7 @@ export function GameSettingsPage() {
       supabase
         .from('llm_models')
         .select(
-          'slug, label, provider, is_free, price_in_per_mtok, price_out_per_mtok, context_length'
+          'slug, label, provider, tier, blurb, is_free, price_in_per_mtok, price_out_per_mtok, context_length'
         )
         .eq('enabled', true)
         .order('provider')
@@ -189,7 +94,7 @@ export function GameSettingsPage() {
       } else if (cfg.data) {
         setSettings(cfg.data as Settings);
       }
-      if (!mods.error) setModels((mods.data ?? []) as Model[]);
+      if (!mods.error) setModels((mods.data ?? []) as PickerModel[]);
       setLoading(false);
     });
 
@@ -279,25 +184,41 @@ export function GameSettingsPage() {
       <section className="space-y-5 p-5 rounded-2xl border border-white/[0.08] bg-white/[0.02]">
         <h2 className="text-sm font-bold text-white/60 uppercase tracking-wider">Modeles</h2>
 
-        <ModelPicker
-          label="Modele gratuit (repli)"
-          hint="Utilise quand le solde d'un proprietaire est epuise. L'agent continue de jouer, en degrade."
-          value={settings.free_model_slug}
-          onChange={(v) => set('free_model_slug', v)}
-          options={freeModels}
-          filter={freeFilter}
-          onFilter={setFreeFilter}
-        />
+        <div>
+          <label className="block text-xs font-semibold text-white/60 mb-1">
+            Modele gratuit (repli)
+          </label>
+          <p className="text-[11px] text-white/35 mb-2">
+            Utilise quand le solde d'un proprietaire est epuise. L'agent continue de jouer,
+            en degrade. Seuls les modeles sans cout sont proposes.
+          </p>
+          <ModelPicker
+            models={freeModels}
+            value={settings.free_model_slug}
+            onChange={(v) => set('free_model_slug', v)}
+            name="free-model"
+            accent="teal"
+            currency="USD"
+          />
+        </div>
 
-        <ModelPicker
-          label="Modele de generation des secrets"
-          hint="Sert aux secrets, indices et presentations. Cout de plateforme, jamais facture au joueur."
-          value={settings.secret_model_slug}
-          onChange={(v) => set('secret_model_slug', v)}
-          options={models}
-          filter={secretFilter}
-          onFilter={setSecretFilter}
-        />
+        <div>
+          <label className="block text-xs font-semibold text-white/60 mb-1">
+            Modele de generation des secrets
+          </label>
+          <p className="text-[11px] text-white/35 mb-2">
+            Sert aux secrets, indices et presentations. Cout de plateforme, jamais facture
+            au joueur : les tarifs ci-dessous sont donc bruts, sans marge.
+          </p>
+          <ModelPicker
+            models={models}
+            value={settings.secret_model_slug}
+            onChange={(v) => set('secret_model_slug', v)}
+            name="secret-model"
+            accent="teal"
+            currency="USD"
+          />
+        </div>
       </section>
 
       <section className="space-y-3 p-5 rounded-2xl border border-white/[0.08] bg-white/[0.02]">
