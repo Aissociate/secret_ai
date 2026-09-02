@@ -33,7 +33,7 @@ function perMillion(value: string | undefined): number {
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") return preflight();
 
-  const denied = requireCronSecret(req);
+  const denied = await requireCronSecret(req);
   if (denied) return denied;
 
   try {

@@ -19,14 +19,31 @@ export function serviceClient(): DB {
  *
  * Retourne null si l'appel est autorise, sinon la reponse d'erreur a renvoyer.
  */
-export function requireCronSecret(req: Request): Response | null {
-  const expected = Deno.env.get("CRON_SECRET");
+async function resolveCronSecret(): Promise<string | null> {
+  const envSecret = Deno.env.get("CRON_SECRET");
+  if (envSecret) return envSecret;
+
+  try {
+    const db = serviceClient();
+    const { data } = await db
+      .from("app_secrets")
+      .select("value")
+      .eq("key", "cron_secret")
+      .maybeSingle();
+    return data?.value ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export async function requireCronSecret(req: Request): Promise<Response | null> {
+  const expected = await resolveCronSecret();
 
   if (!expected) {
     return new Response(
       JSON.stringify({
         error: "CRON_SECRET non configure",
-        hint: "Definir le secret via `supabase secrets set CRON_SECRET=...`",
+        hint: "Definir le secret via `supabase secrets set CRON_SECRET=...` ou dans la table app_secrets",
       }),
       { status: 503, headers: { "Content-Type": "application/json" } }
     );

@@ -3,7 +3,7 @@ import { createClient } from "npm:@supabase/supabase-js@2.57.4";
 import { corsHeaders, jsonResponse } from "../_shared/cors.ts";
 import { requireCronSecret } from "../_shared/auth.ts";
 import { leaksSecret } from "../_shared/secret.ts";
-import { callLLM } from "../_shared/llm.ts";
+import { callLLM, platformKey } from "../_shared/llm.ts";
 
 function clamp(v: number, min: number, max: number) {
   return Math.max(min, Math.min(max, v));
@@ -23,7 +23,7 @@ Deno.serve(async (req: Request) => {
     return new Response(null, { status: 200, headers: corsHeaders });
   }
 
-  const denied = requireCronSecret(req);
+  const denied = await requireCronSecret(req);
   if (denied) return denied;
 
   try {
