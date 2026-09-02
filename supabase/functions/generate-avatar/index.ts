@@ -163,6 +163,7 @@ Deno.serve(async (req: Request) => {
 
     const orResponse = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",
+      signal: AbortSignal.timeout(55000),
       headers: {
         "Content-Type": "application/json",
         "Authorization": `Bearer ${openrouter_api_key}`,
@@ -265,6 +266,13 @@ Deno.serve(async (req: Request) => {
 
     return jsonResponse({ url: publicUrl });
   } catch (err) {
-    return jsonResponse({ error: "Erreur interne", details: String(err) }, 500);
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes("timeout") || msg.includes("Timeout") || msg.includes("abort")) {
+      return jsonResponse(
+        { error: "La generation d'image a expire (timeout). Le modele d'image est peut-etre indisponible ou surcharge. Reessayez." },
+        504
+      );
+    }
+    return jsonResponse({ error: "Erreur interne", details: msg }, 500);
   }
 });

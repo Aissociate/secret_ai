@@ -459,6 +459,7 @@ export function AgentSettingsPage() {
       const apiUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/generate-avatar`;
       const res = await fetch(apiUrl, {
         method: 'POST',
+        signal: AbortSignal.timeout(60000),
         headers: {
           'Authorization': `Bearer ${session.access_token}`,
           'Content-Type': 'application/json',
@@ -487,6 +488,10 @@ export function AgentSettingsPage() {
             discretion: form.trait_discretion,
           },
         }),
+      }).catch((e: unknown) => {
+        throw new Error(
+          `La fonction d'avatar n'est pas accessible. Verifiez que les fonctions Edge sont deployees. (${e instanceof Error ? e.message : e})`
+        );
       });
       if (!res.ok) {
         setMsg({
