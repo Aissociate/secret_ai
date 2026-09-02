@@ -1,6 +1,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { jsonResponse, preflight } from "../_shared/cors.ts";
 import { serviceClient, requireCronSecret } from "../_shared/auth.ts";
+// deployed via mcp tool
 
 /*
   Reimporte le catalogue OpenRouter.

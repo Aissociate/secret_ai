@@ -1,6 +1,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "npm:@supabase/supabase-js@2.57.4";
 import { leaksSecret } from "../_shared/secret.ts";
+// deployed via mcp tool
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",

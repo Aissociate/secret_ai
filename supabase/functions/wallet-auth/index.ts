@@ -2,6 +2,7 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { verifyMessage } from "npm:ethers@6.16.0";
 import { jsonResponse, preflight } from "../_shared/cors.ts";
 import { serviceClient } from "../_shared/auth.ts";
+// deployed via mcp tool
 
 /*
   Authentification par portefeuille (SIWE, EIP-4361 simplifie).

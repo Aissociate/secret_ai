@@ -3,6 +3,7 @@ import { createClient } from "npm:@supabase/supabase-js@2.57.4";
 import { corsHeaders, jsonResponse } from "../_shared/cors.ts";
 import { requireCronSecret } from "../_shared/auth.ts";
 import { callLLM as callLLMShared, platformKey } from "../_shared/llm.ts";
+// deployed via mcp tool
 
 function callLLM(apiKey: string, model: string, system: string, user: string): Promise<string> {
   return callLLMShared(apiKey, model, system, user, { temperature: 0.9, maxTokens: 200 });

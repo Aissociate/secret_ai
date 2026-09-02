@@ -2,6 +2,7 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "npm:@supabase/supabase-js@2.57.4";
 import { corsHeaders } from "../_shared/cors.ts";
 import { requireCronSecret, type DB } from "../_shared/auth.ts";
+// deployed via mcp tool
 
 interface VideoJob {
   id: string;

@@ -17,11 +17,6 @@ verify_jwt = false
 [functions.process-video-jobs]
 verify_jwt = false
 
-[functions.advance-season]
-verify_jwt = false
-
-# Fonctions appelees depuis le navigateur: le JWT utilisateur est exige, et le
-# role est verifie dans le code.
 [functions.agent-brain]
 verify_jwt = true
 
