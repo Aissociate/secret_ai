@@ -346,8 +346,13 @@ export function AgentSettingsPage() {
         headers: {
           'Authorization': `Bearer ${session.access_token}`,
           'Content-Type': 'application/json',
+          'Apikey': import.meta.env.VITE_SUPABASE_ANON_KEY,
         },
         body: JSON.stringify({ randomize_identity: true }),
+      }).catch((e: unknown) => {
+        throw new Error(
+          `La fonction de tirage n'est pas accessible. Vérifiez que les fonctions Edge sont déployées. (${e instanceof Error ? e.message : e})`
+        );
       });
 
       if (!res.ok) {
@@ -405,14 +410,16 @@ export function AgentSettingsPage() {
         headers: {
           'Authorization': `Bearer ${session.access_token}`,
           'Content-Type': 'application/json',
+          'Apikey': import.meta.env.VITE_SUPABASE_ANON_KEY,
         },
         body: JSON.stringify({
-          // La cle est cote serveur: elle ne transite plus par le client.
-          // Le modele de generation vient du panneau d'administration, pas du
-          // modele de jeu choisi ici: il n'a plus a etre transmis.
           agent_name: form.name || 'Agent',
           personality_traits: form.personality_traits || undefined,
         }),
+      }).catch((e: unknown) => {
+        throw new Error(
+          `La fonction de génération n'est pas accessible. Vérifiez que les fonctions Edge sont déployées. (${e instanceof Error ? e.message : e})`
+        );
       });
       if (!res.ok) {
         setMsg({ type: 'err', text: await readFunctionError(res, 'Erreur lors de la generation.') });
@@ -455,6 +462,7 @@ export function AgentSettingsPage() {
         headers: {
           'Authorization': `Bearer ${session.access_token}`,
           'Content-Type': 'application/json',
+          'Apikey': import.meta.env.VITE_SUPABASE_ANON_KEY,
         },
         /*
           L'avatar se dessine a partir de la fiche entiere — sauf le secret et
