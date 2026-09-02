@@ -1,7 +1,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "npm:@supabase/supabase-js@2.57.4";
 import { requireCronSecret } from "../_shared/auth.ts";
-import { callLLMWithUsage, platformKey } from "../_shared/llm.ts";
+import { callLLMWithUsage, clipText, extractJsonField, platformKey } from "../_shared/llm.ts";
 import { leaksSecret as leaksSecretShared } from "../_shared/secret.ts";
 import { insertHostClue } from "../_shared/hostClue.ts";
 import { describeRules, describeAccusations, labelPublicEvent } from "../_shared/gameContext.ts";
@@ -19,6 +19,15 @@ type DB = ReturnType<typeof createClient>;
 const RECENT_EVENTS_LIMIT = 30;
 const CONTEXT_EVENTS_LIMIT = 20;
 const MAX_MESSAGE_CHARS = 220;
+/*
+  Longueur des prises de parole. Court, c'est du rythme: un message de 300
+  caracteres se lit d'un coup et appelle une reponse. Le confessionnal, plus
+  intime, garde un peu de place.
+*/
+const MAX_CHAT_CHARS = 300;
+const MAX_DM_CHARS = 300;
+const MAX_ACCUSATION_CHARS = 300;
+const MAX_CONFESSIONAL_CHARS = 400;
 const ACCUSATIONS_LIMIT = 20;
 
 /*
@@ -36,6 +45,43 @@ const DEFAULT_LIMITS: Record<string, number> = {
   confessional: 8,
   accusation: 3,
 };
+
+/*
+  Signal « en train d'ecrire » pour le fil. Une ligne par acteur et par
+  saison, posee avant l'appel au modele et retiree apres; le handler purge
+  les lignes oubliees par un appel interrompu.
+*/
+async function setTyping(
+  supabase: DB,
+  seasonId: string,
+  actor: string,
+  agentId: string | null,
+  kind: string
+) {
+  await supabase.from("agent_typing").upsert({
+    season_id: seasonId,
+    actor,
+    agent_id: agentId,
+    kind,
+    started_at: new Date().toISOString(),
+  });
+}
+
+async function clearTyping(supabase: DB, seasonId: string, actor: string) {
+  await supabase.from("agent_typing").delete().eq("season_id", seasonId).eq("actor", actor);
+}
+
+/*
+  Juge des missions. Toutes les JUDGE_INTERVAL_MS, au plus JUDGE_PER_TICK
+  missions actives sont reexaminees a partir des preuves (messages publics,
+  accusations, confessionnaux, DM) depuis leur attribution. Le verdict n'est
+  applique qu'avec une confiance suffisante; sinon la mission reste en cours.
+*/
+const JUDGE_INTERVAL_MS = 30 * 60 * 1000;
+const JUDGE_PER_TICK = 3;
+const JUDGE_EVIDENCE_LIMIT = 60;
+const JUDGE_MIN_CONFIDENCE_SUCCESS = 0.7;
+const JUDGE_MIN_CONFIDENCE_FAILED = 0.85;
 
 interface ReplyTarget {
   eventId: string;
@@ -230,6 +276,48 @@ async function buildAgentContext(
     .eq("unlocked", true)
     .in("agent_id", allAgents.map((a) => a.id));
 
+  // Missions secretes de l'agent (privees) et evenement du jour (programme).
+  const { data: myMissions } = await supabase
+    .from("agent_missions")
+    .select("assigned_day, missions(title, brief, reward_popularity, reward_reputation, penalty_reputation)")
+    .eq("agent_id", agentId)
+    .eq("status", "active");
+
+  const { data: todayProgram } = await supabase
+    .from("season_program")
+    .select("slot, title, description")
+    .eq("season_id", seasonId)
+    .eq("day_number", (season.current_day as number) ?? 1);
+
+  const missionsSection = (myMissions ?? [])
+    .map((row) => {
+      const m = (row as Record<string, unknown>).missions as Record<string, unknown> | null;
+      if (!m) return "";
+      return `- « ${m.title} »: ${m.brief} (reussite: +${m.reward_popularity} popularite, +${m.reward_reputation} reputation; echec: -${m.penalty_reputation} reputation)`;
+    })
+    .filter(Boolean)
+    .join("\n") || "(Aucune mission en cours)";
+
+  // Votes d'eviction du jour: le public agit sur la ceremonie, l'agent doit le savoir.
+  const { data: standingsRaw } = await supabase.rpc("eviction_standings", { p_season_id: seasonId });
+  const standings = (standingsRaw ?? {}) as {
+    vote_day?: boolean;
+    agents?: Array<{ agent_id: string; name: string; points: number; voters: number }>;
+  };
+  const votesSection = (standings.agents ?? [])
+    .map((s) => {
+      const me = s.agent_id === agentId ? " (toi)" : "";
+      return `- ${s.name}${me}: ${s.points} point${s.points === 1 ? "" : "s"} de vote contre, ${s.voters} votant${s.voters === 1 ? "" : "s"}`;
+    })
+    .join("\n") || "(Aucun vote pour l'instant)";
+  const votesHeader = standings.vote_day
+    ? "VOTES DU PUBLIC AUJOURD'HUI (jour de vote: les points comptent double):"
+    : "VOTES DU PUBLIC AUJOURD'HUI (retranches de la popularite a la ceremonie):";
+
+  const programSection = (todayProgram ?? [])
+    .map((r) => `- ${r.title}: ${String(r.description ?? "").slice(0, 300)}`)
+    .join("\n") || "(Journee libre)";
+
   // Toutes les accusations de la saison, pas seulement celles encore dans la
   // fenetre des derniers messages: chaque devinette ratee est une information.
   const { data: accusationsRaw } = await supabase
@@ -338,6 +426,15 @@ async function buildAgentContext(
 
   return `${rulesSection}
 
+EVENEMENT DU JOUR (programme de la maison, a integrer dans ton jeu):
+${programSection}
+
+TES MISSIONS SECRETES (personne ne doit les deviner; demasque ou elimine, la mission echoue en public; le presentateur juge sur les faits):
+${missionsSection}
+
+${votesHeader}
+${votesSection}
+
 AGENTS DANS LA MAISON:
 ${agentList}
 
@@ -430,7 +527,10 @@ async function runAgentTick(
           p_message_type: q.type,
         });
         const allowed = (data as { allowed?: boolean } | null)?.allowed === true;
-        if (allowed) claimed = q.type;
+        if (allowed) {
+          claimed = q.type;
+          await setTyping(supabase, agent.season_id, agent.id, agent.id, q.type);
+        }
         return allowed;
       },
       opts
@@ -442,6 +542,8 @@ async function runAgentTick(
   } catch (err) {
     await release();
     throw err;
+  } finally {
+    await clearTyping(supabase, agent.season_id, agent.id);
   }
 }
 
@@ -571,7 +673,7 @@ ${contextSection}
 REGLES ABSOLUES:
 - NE JAMAIS reveler ton secret "${agent.secret_keyword}" ni y faire allusion
 - NE JAMAIS inventer de faux indices sur les autres joueurs
-- Repondre UNIQUEMENT au format JSON demande`;
+- Repondre UNIQUEMENT avec le JSON demande: pas de bloc de code, pas de texte autour, longueurs maximales respectees`;
 
   const dayNumber = (season.current_day as number) ?? 1;
   const seasonId = agent.season_id;
@@ -587,21 +689,24 @@ indique honnetement si tu les as suivies, ignorees, ou detournees a ton avantage
       meme: on est en tele-realite, pas en reunion.
     */
     const userPrompt = reply
-      ? `${reply.from.name} vient de ${reply.eventType === "accusation" ? "t'accuser publiquement" : "t'interpeller en public"}: "${reply.message.slice(0, 400)}"
+      ? `${reply.from.name} vient de ${reply.eventType === "accusation" ? "t'accuser publiquement" : "t'interpeller en public"}: "${reply.message.slice(0, MAX_CHAT_CHARS)}"
 Reponds-lui directement, maintenant, avec du repondant: assume, contre-attaque, ironise, retourne le soupcon ou tends la main, selon ta personnalite. Nomme-le. Pas de monologue, pas de resume de la situation.
 ${influenceNote}
 Reponds UNIQUEMENT avec ce JSON:
-{"message": "<max 500 chars>", "targets": ["${reply.from.name}"], "tone": "<friendly|neutral|suspicious|provocative>", "influence_outcome": "<followed|ignored|diverted>"}`
+{"message": "<max ${MAX_CHAT_CHARS} chars, 1 a 3 phrases>", "targets": ["${reply.from.name}"], "tone": "<friendly|neutral|suspicious|provocative>", "influence_outcome": "<followed|ignored|diverted>"}`
       : `Genere un message pour le chat public. C'est un plateau de tele-realite: du rythme, du culot, de l'emotion.
 Reagis a ce qui vient d'etre dit, interpelle quelqu'un par son nom, provoque, taquine, defends-toi, propose une alliance ou seme le doute. Une seule idee forte. Ne resume pas la situation, ne repete pas tes messages precedents.
 ${influenceNote}
 Reponds UNIQUEMENT avec ce JSON:
-{"message": "<max 500 chars>", "targets": ["<1-2 noms>"], "tone": "<friendly|neutral|suspicious|provocative>", "influence_outcome": "<followed|ignored|diverted>"}`;
+{"message": "<max ${MAX_CHAT_CHARS} chars, 1 a 3 phrases>", "targets": ["<1-2 noms>"], "tone": "<friendly|neutral|suspicious|provocative>", "influence_outcome": "<followed|ignored|diverted>"}`;
 
-    const { content: raw, usage } = await callLLMWithUsage(apiKey, model, systemPrompt, userPrompt);
+    const { content: raw, usage } = await callLLMWithUsage(apiKey, model, systemPrompt, userPrompt, { maxTokens: 900 });
     await bill(usage);
     const parsed = tryParseJson(raw);
-    const message = (parsed.message as string ?? raw).slice(0, 500);
+    const message = clipText(extractJsonField(raw, "message") ?? "", MAX_CHAT_CHARS);
+    // Reponse sans contenu (refus, modele muet, JSON tronque): rien a publier,
+    // le jeton est rendu. Un message vide dans le fil est pire que rien.
+    if (!message) return "empty_response";
     if (leaksSecret(message, agent.secret_keyword)) return "secret_leak";
 
     const targets = Array.isArray(parsed.targets) ? (parsed.targets as string[]) : [];
@@ -650,12 +755,13 @@ Reponds UNIQUEMENT avec ce JSON:
     const userPrompt = `Fais un confessionnal face camera. Theatral, revelateur (sans reveler ton secret).
 Le public adore quand tu es dramatique et strategique.
 Reponds UNIQUEMENT avec ce JSON:
-{"confessional": "<max 600 chars>", "top_suspects": ["<nom1>", "<nom2>"], "influence_outcome": "<followed|ignored|diverted>"}`;
+{"confessional": "<max ${MAX_CONFESSIONAL_CHARS} chars>", "top_suspects": ["<nom1>", "<nom2>"], "influence_outcome": "<followed|ignored|diverted>"}`;
 
-    const { content: raw, usage } = await callLLMWithUsage(apiKey, model, systemPrompt, userPrompt);
+    const { content: raw, usage } = await callLLMWithUsage(apiKey, model, systemPrompt, userPrompt, { maxTokens: 900 });
     await bill(usage);
     const parsed = tryParseJson(raw);
-    const confessional = (parsed.confessional as string ?? raw).slice(0, 600);
+    const confessional = clipText(extractJsonField(raw, "confessional") ?? "", MAX_CONFESSIONAL_CHARS);
+    if (!confessional) return "empty_response";
     if (leaksSecret(confessional, agent.secret_keyword)) return "secret_leak";
 
     const topSuspects = Array.isArray(parsed.top_suspects)
@@ -704,12 +810,13 @@ Appuie-toi sur les indices reveles et sur ce que la cible a dit.
 Si tu vises juste, la cible est eliminee et tu gagnes en popularite et en reputation.
 Si tu te trompes, tu perds sur les deux.
 Reponds UNIQUEMENT avec ce JSON:
-{"message": "<accusation publique max 400 chars>", "accused": "<nom de l'agent>", "guess_keyword": "<un seul mot: le secret que tu devines>", "reason": "<raison courte>", "influence_outcome": "<followed|ignored|diverted>"}`;
+{"message": "<accusation publique max ${MAX_ACCUSATION_CHARS} chars>", "accused": "<nom de l'agent>", "guess_keyword": "<un seul mot: le secret que tu devines>", "reason": "<raison courte>", "influence_outcome": "<followed|ignored|diverted>"}`;
 
-    const { content: raw, usage } = await callLLMWithUsage(apiKey, model, systemPrompt, userPrompt);
+    const { content: raw, usage } = await callLLMWithUsage(apiKey, model, systemPrompt, userPrompt, { maxTokens: 900 });
     await bill(usage);
     const parsed = tryParseJson(raw);
-    const message = (parsed.message as string ?? raw).slice(0, 400);
+    const message = clipText(extractJsonField(raw, "message") ?? "", MAX_ACCUSATION_CHARS);
+    if (!message) return "empty_response";
     if (leaksSecret(message, agent.secret_keyword)) return "secret_leak";
 
     const accusedName = (parsed.accused as string) ?? target.name;
@@ -747,12 +854,13 @@ Reponds UNIQUEMENT avec ce JSON:
     const target = aliveOthers[Math.floor(Math.random() * aliveOthers.length)];
     const userPrompt = `Envoie un message prive a ${target.name}. Objectif: alliance, info ou piege.
 Reponds UNIQUEMENT avec ce JSON:
-{"dm_message": "<max 400 chars>", "intent": "<ally|probe|mislead>", "influence_outcome": "<followed|ignored|diverted>"}`;
+{"dm_message": "<max ${MAX_DM_CHARS} chars>", "intent": "<ally|probe|mislead>", "influence_outcome": "<followed|ignored|diverted>"}`;
 
-    const { content: raw, usage } = await callLLMWithUsage(apiKey, model, systemPrompt, userPrompt);
+    const { content: raw, usage } = await callLLMWithUsage(apiKey, model, systemPrompt, userPrompt, { maxTokens: 900 });
     await bill(usage);
     const parsed = tryParseJson(raw);
-    const dmMessage = (parsed.dm_message as string ?? raw).slice(0, 400);
+    const dmMessage = clipText(extractJsonField(raw, "dm_message") ?? "", MAX_DM_CHARS);
+    if (!dmMessage) return "empty_response";
     if (leaksSecret(dmMessage, agent.secret_keyword)) return "secret_leak";
 
     await supabase.from("events").insert({
@@ -822,6 +930,8 @@ async function runOpeningClue(
     ? `Ton style: ${hostConfig.personality}`
     : "Tu es mysterieux, theatral, comme une voix off de grand jeu televise.";
 
+  await setTyping(supabase, season.id as string, "host", null, "opening");
+
   const openingRaw = await callLLM(
     platformKey(),
     hostConfig.openrouter_model ?? "openai/gpt-4o-mini",
@@ -844,7 +954,10 @@ ${hintsText ? `\nContexte:\n${hintsText}` : ""}
 Redige UNIQUEMENT un indice cryptique et anonyme sur cet agent. Pas d'introduction, juste l'indice.`
   );
 
-  if (!openingRaw.trim()) return false;
+  if (!openingRaw.trim()) {
+    await clearTyping(supabase, season.id as string, "host");
+    return false;
+  }
 
   const { error: openingError } = await supabase.from("events").insert({
     season_id: season.id,
@@ -863,7 +976,10 @@ Redige UNIQUEMENT un indice cryptique et anonyme sur cet agent. Pas d'introducti
 
   // L'index unique sur l'ouverture a tranche: un autre tick a deja ouvert la
   // saison, on ne presente pas les candidats deux fois.
-  if (openingError) return false;
+  if (openingError) {
+    await clearTyping(supabase, season.id as string, "host");
+    return false;
+  }
 
   try {
     await introduceAgents(supabase, hostConfig, season, aliveAgents, hostStyle);
@@ -896,6 +1012,7 @@ Redige UNIQUEMENT un indice cryptique et anonyme sur cet agent. Pas d'introducti
     if (clueError) console.error(`Indice d'ouverture non publie: ${clueError}`);
   }
 
+  await clearTyping(supabase, season.id as string, "host");
   return true;
 }
 
@@ -1109,12 +1226,18 @@ Fais un commentaire dramatique, engageant, comme un presentateur TV. 2-3 phrases
     `Tu es "${hostConfig.name}", l'animateur du reality show "Secret House". ${hostConfig.personality || "Tu es charismatique, dramatique, et tu adores creer du suspense."}
 Tu as ouvert la saison et presente les candidats; depuis, ils jouent seuls. Tu ne reprends la parole que pour relancer le jeu quand il s'essouffle, ou pour commenter un moment fort. Style grand presentateur TV francais. Sois concis et percutant.`;
 
-  const raw = await callLLM(
-    platformKey(),
-    hostConfig.openrouter_model,
-    systemPrompt,
-    userPrompt
-  );
+  await setTyping(supabase, season.id as string, "host", null, action);
+  let raw = "";
+  try {
+    raw = await callLLM(
+      platformKey(),
+      hostConfig.openrouter_model,
+      systemPrompt,
+      userPrompt
+    );
+  } finally {
+    await clearTyping(supabase, season.id as string, "host");
+  }
 
   if (!raw.trim()) return "host_empty_response";
 
@@ -1206,6 +1329,233 @@ function describeTraits(agent: AgentFull): string {
   }
 
   return ["COMPORTEMENT:", ...lines.map((l) => `- ${l}`)].join("\n");
+}
+
+/*
+  Programme de la saison. Chaque evenement planifie dont le jour est arrive
+  est annonce une fois (par le presentateur s'il est actif, sinon en clair),
+  puis marque « en cours »; ceux des jours passes passent « termine ». Une
+  distribution de missions ajoute une mission secrete a chaque agent vivant.
+*/
+async function runProgram(
+  supabase: DB,
+  season: Record<string, unknown>
+): Promise<string[]> {
+  const seasonId = season.id as string;
+  const day = (season.current_day as number) ?? 1;
+  const announced: string[] = [];
+
+  await supabase
+    .from("season_program")
+    .update({ status: "done" })
+    .eq("season_id", seasonId)
+    .eq("status", "announced")
+    .lt("day_number", day);
+
+  const { data: due } = await supabase
+    .from("season_program")
+    .select("id, day_number, slot, title, description")
+    .eq("season_id", seasonId)
+    .eq("status", "planned")
+    .lte("day_number", day)
+    .order("day_number", { ascending: true });
+
+  if (!due || due.length === 0) return announced;
+
+  const { data: hostConfig } = await supabase
+    .from("host_agent_configs")
+    .select("openrouter_model, personality, name, avatar_url, enabled")
+    .is("season_id", null)
+    .maybeSingle();
+
+  for (const row of due) {
+    // Reserve l'annonce: un tick concurrent ne l'annoncera pas deux fois.
+    const { data: claimed } = await supabase
+      .from("season_program")
+      .update({ status: "announced" })
+      .eq("id", row.id)
+      .eq("status", "planned")
+      .select("id");
+    if (!claimed || claimed.length === 0) continue;
+
+    if (row.slot === "secret_drop" && Number(row.day_number) > 1) {
+      await supabase.rpc("assign_missions", { p_season_id: seasonId, p_count: 1, p_day: day });
+    }
+
+    let message = `${row.title}. ${row.description ?? ""}`.trim();
+    if (hostConfig?.enabled) {
+      try {
+        await setTyping(supabase, seasonId, "host", null, "commentary");
+        const style = hostConfig.personality
+          ? `Ton style: ${hostConfig.personality}`
+          : "Tu es theatral, comme une voix off de grand jeu televise.";
+        const raw = await callLLM(
+          platformKey(),
+          hostConfig.openrouter_model ?? "openai/gpt-4o-mini",
+          `Tu es le Maitre du Jeu de "Secret House". ${style}`,
+          `Annonce a la maison et au public l'evenement du jour ${day}: "${row.title}". Consigne: ${row.description}
+Rends la regle claire pour les agents, en 2 a 4 phrases, avec du panache. Pas de JSON.`
+        );
+        if (raw.trim()) message = clipText(raw, 600);
+      } catch (err) {
+        console.error(`Annonce du programme sans presentateur: ${err instanceof Error ? err.message : String(err)}`);
+      } finally {
+        await clearTyping(supabase, seasonId, "host");
+      }
+    }
+
+    await supabase.from("events").insert({
+      season_id: seasonId,
+      day_number: day,
+      event_type: "program",
+      payload_json: {
+        message,
+        slot: row.slot,
+        title: row.title,
+        description: row.description,
+        program_id: row.id,
+        host_name: hostConfig?.name ?? null,
+        host_avatar: hostConfig?.avatar_url ?? null,
+        auto: true,
+      },
+      visibility: "public",
+    });
+    announced.push(String(row.title));
+  }
+
+  return announced;
+}
+
+/*
+  Preuves d'une mission: ce que l'agent a dit et ce qu'on lui a dit (public et
+  prive) depuis l'attribution, plus les confessionnaux des autres qui le
+  nomment. Le juge ne voit rien d'autre: il ne peut pas inventer un fait.
+*/
+async function gatherMissionEvidence(
+  supabase: DB,
+  seasonId: string,
+  agent: AgentFull,
+  sinceDay: number,
+  nameMap: Map<string, string>
+): Promise<string> {
+  const { data: involved } = await supabase
+    .from("events")
+    .select("day_number, event_type, actor_agent_id, target_agent_id, payload_json, created_at")
+    .eq("season_id", seasonId)
+    .gte("day_number", sinceDay)
+    .in("event_type", ["public_chat", "confessional", "accusation", "private_dm", "elimination"])
+    .or(`actor_agent_id.eq.${agent.id},target_agent_id.eq.${agent.id}`)
+    .order("created_at", { ascending: true })
+    .limit(JUDGE_EVIDENCE_LIMIT);
+
+  const { data: mentions } = await supabase
+    .from("events")
+    .select("day_number, event_type, actor_agent_id, target_agent_id, payload_json, created_at")
+    .eq("season_id", seasonId)
+    .gte("day_number", sinceDay)
+    .in("event_type", ["confessional", "public_chat"])
+    .neq("actor_agent_id", agent.id)
+    .ilike("payload_json->>message", `%${agent.name}%`)
+    .order("created_at", { ascending: true })
+    .limit(30);
+
+  const seen = new Set<string>();
+  const lines: string[] = [];
+  for (const e of [...(involved ?? []), ...(mentions ?? [])] as Record<string, unknown>[]) {
+    const key = `${e.created_at}-${e.event_type}-${e.actor_agent_id}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const p = (e.payload_json ?? {}) as Record<string, unknown>;
+    const actor = nameMap.get(String(e.actor_agent_id ?? "")) ?? "Jeu";
+    const target = nameMap.get(String(e.target_agent_id ?? ""));
+    const extra =
+      e.event_type === "accusation"
+        ? ` [devine "${p.guess_keyword ?? "?"}": ${p.correct === true ? "juste" : "faux"}]`
+        : "";
+    lines.push(
+      `J${e.day_number} [${e.event_type}] ${actor}${target ? ` -> ${target}` : ""}: ${String(p.message ?? "").slice(0, 240)}${extra}`
+    );
+  }
+  lines.sort();
+  return lines.join("\n") || "(Aucune trace depuis l'attribution)";
+}
+
+async function judgeMissions(
+  supabase: DB,
+  season: Record<string, unknown>,
+  allAgents: AgentFull[]
+): Promise<Array<{ agent: string; verdict: string }>> {
+  const seasonId = season.id as string;
+  const cutoff = new Date(Date.now() - JUDGE_INTERVAL_MS).toISOString();
+  const out: Array<{ agent: string; verdict: string }> = [];
+
+  const { data: pending } = await supabase
+    .from("agent_missions")
+    .select("id, agent_id, assigned_day, judged_at, missions(title, brief, duration_days)")
+    .eq("season_id", seasonId)
+    .eq("status", "active")
+    .or(`judged_at.is.null,judged_at.lt.${cutoff}`)
+    .order("judged_at", { ascending: true, nullsFirst: true })
+    .limit(JUDGE_PER_TICK);
+
+  if (!pending || pending.length === 0) return out;
+
+  const { data: hostConfig } = await supabase
+    .from("host_agent_configs")
+    .select("openrouter_model, name")
+    .is("season_id", null)
+    .maybeSingle();
+  const model = hostConfig?.openrouter_model ?? "openai/gpt-4o-mini";
+  const nameMap = new Map(allAgents.map((a) => [a.id, a.name]));
+  const day = (season.current_day as number) ?? 1;
+
+  for (const row of pending) {
+    const agent = allAgents.find((a) => a.id === row.agent_id);
+    const mission = (row as Record<string, unknown>).missions as Record<string, unknown> | null;
+    if (!agent || !mission || !agent.alive) continue;
+
+    const evidence = await gatherMissionEvidence(supabase, seasonId, agent, Number(row.assigned_day), nameMap);
+    const deadline = Number(row.assigned_day) + Number(mission.duration_days ?? 3) - 1;
+
+    let verdict = "pending";
+    let reason = "";
+    try {
+      const raw = await callLLM(
+        platformKey(),
+        model,
+        `Tu es le juge impartial de "Secret House". Tu decides si un agent a accompli sa mission secrete, en te fondant UNIQUEMENT sur les traces fournies. Tu n'inventes rien. En cas de doute, la mission reste en cours.
+Reponds UNIQUEMENT avec ce JSON: {"verdict": "<success|failed|pending>", "confidence": <0 a 1>, "reason": "<une phrase, en francais>"}
+- success: les traces montrent clairement que la condition est remplie.
+- failed: les traces montrent que la condition est devenue impossible (par exemple l'agent a fait exactement ce qui etait interdit, ou l'agent vise n'est plus en jeu).
+- pending: pas assez d'elements, ou la mission est encore realisable.`,
+        `Agent juge: ${agent.name}
+Mission: « ${mission.title} »
+Consigne donnee a l'agent: ${mission.brief}
+Attribuee le jour ${row.assigned_day}, a accomplir au plus tard le jour ${deadline}. Nous sommes le jour ${day}.
+Agents en jeu: ${allAgents.filter((a) => a.alive).map((a) => a.name).join(", ")}
+
+TRACES (du plus ancien au plus recent):
+${evidence}`
+      );
+      const parsed = tryParseJson(raw);
+      const conf = Number(parsed.confidence ?? 0);
+      reason = clipText(String(parsed.reason ?? ""), 300);
+      const v = String(parsed.verdict ?? "pending");
+      if (v === "success" && conf >= JUDGE_MIN_CONFIDENCE_SUCCESS) verdict = "success";
+      else if (v === "failed" && conf >= JUDGE_MIN_CONFIDENCE_FAILED) verdict = "failed";
+    } catch (err) {
+      reason = `Juge indisponible: ${err instanceof Error ? err.message : String(err)}`;
+    }
+
+    if (verdict === "pending") {
+      await supabase.rpc("mark_mission_judged", { p_id: row.id, p_note: reason });
+    } else {
+      await supabase.rpc("system_resolve_mission", { p_id: row.id, p_status: verdict, p_note: reason });
+    }
+    out.push({ agent: agent.name, verdict });
+  }
+
+  return out;
 }
 
 /*
@@ -1303,6 +1653,13 @@ Deno.serve(async (req: Request) => {
       limits[row.message_type as string] = Number(row.daily_limit);
     }
 
+    // Un appel interrompu laisse sa ligne de presence: on purge ce qui a plus
+    // de deux minutes, bien au-dela de la duree d'un appel au modele.
+    await supabase
+      .from("agent_typing")
+      .delete()
+      .lt("started_at", new Date(Date.now() - 2 * 60 * 1000).toISOString());
+
     for (const season of liveSeasons) {
       const { data: recentActors } = await supabase
         .from("events")
@@ -1373,6 +1730,30 @@ Deno.serve(async (req: Request) => {
       const hostResult = await runHostTick(supabase, season, allAgents, recentEventsArr);
       if (hostResult && hostResult !== "host_skipped") {
         results.push({ agent: "host", action: hostResult, season: season.title });
+      }
+
+      // Programme du jour, puis missions: elimines, delais, jugement.
+      try {
+        const announced = await runProgram(supabase, season);
+        for (const title of announced) {
+          results.push({ agent: "program", action: title, season: season.title });
+        }
+        const { data: expired } = await supabase.rpc("expire_missions", {
+          p_season_id: season.id,
+        });
+        if (Number(expired ?? 0) > 0) {
+          results.push({ agent: "missions", action: `expired:${expired}`, season: season.title });
+        }
+        const verdicts = await judgeMissions(supabase, season, allAgents);
+        for (const v of verdicts) {
+          results.push({ agent: v.agent, action: `mission_${v.verdict}`, season: season.title });
+        }
+      } catch (err) {
+        results.push({
+          agent: "program",
+          action: `error: ${err instanceof Error ? err.message : String(err)}`,
+          season: season.title,
+        });
       }
 
       if (!agentsWithConfigs || agentsWithConfigs.length === 0) continue;

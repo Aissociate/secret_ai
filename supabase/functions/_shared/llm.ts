@@ -28,6 +28,62 @@ export type LLMUsage = { promptTokens: number; outputTokens: number };
 
 export type LLMResult = { content: string; usage: LLMUsage };
 
+/*
+  Lit un champ texte dans la reponse d'un modele, en tolerant ses manies:
+  bloc ```json, texte autour, JSON tronque par max_tokens. Si le champ est
+  introuvable, on renvoie null: mieux vaut ne rien publier que le JSON brut
+  (c'est ce qui affichait `{"confessional": ...` dans le fil).
+*/
+/*
+  Coupe un texte trop long a la fin de la derniere phrase complete, plutot
+  qu'au milieu d'un mot. Faute de fin de phrase assez loin, coupe au dernier
+  espace avec des points de suspension.
+*/
+export function clipText(text: string, max: number): string {
+  const t = text.trim();
+  if (t.length <= max) return t;
+  const head = t.slice(0, max);
+  const lastEnd = Math.max(head.lastIndexOf(". "), head.lastIndexOf("! "), head.lastIndexOf("? "),
+    head.endsWith(".") || head.endsWith("!") || head.endsWith("?") ? head.length - 1 : -1);
+  if (lastEnd >= max * 0.5) return head.slice(0, lastEnd + 1).trim();
+  const lastSpace = head.lastIndexOf(" ");
+  return (lastSpace > max * 0.5 ? head.slice(0, lastSpace) : head).trim() + "…";
+}
+
+export function extractJsonField(raw: string, key: string): string | null {
+  const cleaned = raw.replace(/```(?:json)?/gi, "").trim();
+
+  const objMatch = cleaned.match(/\{[\s\S]*\}/);
+  if (objMatch) {
+    try {
+      const parsed = JSON.parse(objMatch[0]) as Record<string, unknown>;
+      const v = parsed?.[key];
+      if (typeof v === "string" && v.trim()) return v.trim();
+    } catch {
+      // JSON tronque ou invalide: on tente la recuperation partielle.
+    }
+  }
+
+  // Valeur du champ jusqu'au premier guillemet non echappe, ou jusqu'a la fin
+  // si le modele a ete coupe en plein milieu.
+  const re = new RegExp('"' + key + '"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)');
+  const m = cleaned.match(re);
+  if (m && m[1]) {
+    const text = m[1]
+      .replace(/\\n/g, "\n")
+      .replace(/\\"/g, '"')
+      .replace(/\\\\/g, "\\")
+      .trim();
+    if (text) return text;
+  }
+
+  // Pas de JSON du tout: le modele a repondu en texte libre, on le garde.
+  if (!cleaned.startsWith("{") && !cleaned.includes('"' + key + '"')) {
+    return cleaned || null;
+  }
+  return null;
+}
+
 /**
  * Variante qui remonte la consommation.
  *

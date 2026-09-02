@@ -36,6 +36,12 @@ const AgentListPage = lazy(() =>
 const AgentSettingsPage = lazy(() =>
   import('./pages/AgentSettingsPage').then((m) => ({ default: m.AgentSettingsPage }))
 );
+const ProgramPage = lazy(() =>
+  import('./pages/ProgramPage').then((m) => ({ default: m.ProgramPage }))
+);
+const MissionsSettingsPage = lazy(() =>
+  import('./pages/MissionsSettingsPage').then((m) => ({ default: m.MissionsSettingsPage }))
+);
 const AgentCareerPage = lazy(() =>
   import('./pages/AgentCareerPage').then((m) => ({ default: m.AgentCareerPage }))
 );
@@ -97,6 +103,7 @@ export function ShowRouter() {
 
           <Route element={<RequireAuth roles={['admin']} />}>
             <Route path="/settings/game" element={<GameSettingsPage />} />
+            <Route path="/settings/missions" element={<MissionsSettingsPage />} />
           </Route>
 
           <Route element={<RequireAuth roles={['owner', 'admin']} />}>
@@ -112,6 +119,7 @@ export function ShowRouter() {
           <Route path="confessionals" element={<ConfessionalsPage />} />
           <Route path="suspicion" element={<SuspicionPage />} />
           <Route path="hints" element={<HintsPage />} />
+          <Route path="program" element={<ProgramPage />} />
           <Route path="videos" element={<VideosGalleryPage />} />
 
           {/* Reglages sensibles: cles de generation, configuration du presentateur. */}

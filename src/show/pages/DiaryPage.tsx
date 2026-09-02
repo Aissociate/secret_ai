@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { ArrowLeft, BookOpen, Lock, Unlock, Clock, Heart, Brain, AlertTriangle, Sparkles, DollarSign, Shield, CheckCircle, XCircle, RotateCcw } from 'lucide-react';
-import { fetchAgent, fetchAgents, fetchDiaryEntries, fetchSeason, checkDiaryUnlock, purchaseDiaryUnlock, triggerDiaryGeneration, fetchInfluenceHistory } from '../api/client';
-import type { Agent, AgentDetail, DiaryEntry, InfluenceRecord, Season } from '../api/types';
+import { fetchAgent, fetchAgents, fetchDiaryEntries, fetchSeason, checkDiaryUnlock, purchaseDiaryUnlock, triggerDiaryGeneration, fetchInfluenceHistory, fetchAgentMissions } from '../api/client';
+import type { Agent, AgentDetail, AgentMission, DiaryEntry, InfluenceRecord, Season } from '../api/types';
 import { SkeletonBlock } from '../components/Skeleton';
 import { OwnerPanel } from '../components/OwnerPanel';
 import { useAuth } from '../context/AuthContext';
@@ -18,6 +18,45 @@ const OUTCOME_LABELS: Record<string, { label: string; color: string; Icon: typeo
   Consignes du proprietaire, en lecture seule, pour ceux qui ont deverrouille
   le journal. Le proprietaire, lui, a le panneau complet (envoi + historique).
 */
+/*
+  Les missions secretes de l'agent: la deuxieme moitie de ce qu'il cache.
+  Visibles avec le journal (proprietaire, admin, deverrouillage), et par tous
+  une fois revelees.
+*/
+function MissionsList({ missions }: { missions: AgentMission[] }) {
+  return (
+    <section className="border border-violet-400/10 rounded-2xl p-5 bg-gradient-to-br from-violet-500/[0.04] to-transparent">
+      <div className="flex items-center gap-2 mb-3">
+        <Sparkles className="w-4 h-4 text-violet-400" />
+        <h3 className="text-sm font-bold text-violet-300">Missions secretes</h3>
+      </div>
+      {missions.length === 0 ? (
+        <p className="text-xs text-white/35">Aucune mission attribuee.</p>
+      ) : (
+        <ul className="space-y-2">
+          {missions.map((m) => {
+            const status =
+              m.status === 'active' ? { label: 'En cours', color: 'text-amber-300' }
+              : m.status === 'success' ? { label: 'Reussie', color: 'text-emerald-400' }
+              : { label: 'Echouee', color: 'text-red-400' };
+            return (
+              <li key={m.id} className="rounded-xl bg-white/[0.03] border border-white/[0.06] px-3 py-2.5">
+                <div className="flex items-center gap-2 mb-1">
+                  <span className="text-xs font-bold text-white/90">« {m.mission?.title} »</span>
+                  <span className={`text-[10px] font-bold ${status.color}`}>{status.label}</span>
+                  <span className="text-[10px] text-white/30">depuis J{m.assigned_day}</span>
+                </div>
+                <p className="text-xs text-white/60 leading-relaxed">{m.mission?.brief}</p>
+                {m.resolved_note && <p className="text-[11px] text-white/40 italic mt-1">{m.resolved_note}</p>}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </section>
+  );
+}
+
 function DirectivesReadOnly({ directives }: { directives: InfluenceRecord[] }) {
   return (
     <section className="border border-teal-400/10 rounded-2xl p-5 bg-gradient-to-br from-teal-500/[0.04] to-transparent">
@@ -237,6 +276,7 @@ export function DiaryPage() {
   const [entries, setEntries] = useState<DiaryEntry[]>([]);
   const [unlocked, setUnlocked] = useState(false);
   const [directives, setDirectives] = useState<InfluenceRecord[]>([]);
+  const [missions, setMissions] = useState<AgentMission[]>([]);
   const [loading, setLoading] = useState(true);
   const [unlocking, setUnlocking] = useState(false);
   const [generating, setGenerating] = useState(false);
@@ -277,6 +317,19 @@ export function DiaryPage() {
   }, [profile?.id, aid, sid, isSeasonEnded]);
 
   const canView = unlocked || isAdmin || isSeasonEnded || isOwner;
+
+  useEffect(() => {
+    if (!canView) return;
+    let cancelled = false;
+    fetchAgentMissions(sid, aid)
+      .then((rows) => {
+        if (!cancelled) setMissions(rows);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [canView, aid, sid]);
 
   useEffect(() => {
     if (!canView || isOwner) return;
@@ -457,6 +510,8 @@ export function DiaryPage() {
           ) : (
             <DirectivesReadOnly directives={directives} />
           )}
+
+          <MissionsList missions={missions} />
 
           <div className="flex items-center gap-2 overflow-x-auto pb-1 scrollbar-thin">
             <button

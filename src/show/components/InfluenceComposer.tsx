@@ -22,7 +22,6 @@ export function InfluenceComposer({
   onSent,
 }: InfluenceComposerProps) {
   const [message, setMessage] = useState('');
-  const [amount, setAmount] = useState(1);
   const [mode, setMode] = useState<'owner' | 'spectator'>('spectator');
   const [busy, setBusy] = useState(false);
   const [info, setInfo] = useState<string | null>(null);
@@ -67,7 +66,7 @@ export function InfluenceComposer({
         if (me.role === 'admin') {
           setInfo("Influence envoyee (gratuit admin). L'IA decidera si elle suit ou non.");
         } else {
-          setInfo('Influence creee. Paiement en attente.');
+          setInfo('Influence envoyee et debitee de ton solde.');
         }
       }
       setMessage('');
@@ -144,22 +143,12 @@ export function InfluenceComposer({
       </p>
 
       {mode === 'spectator' && me?.role !== 'admin' && (
-        <div className="flex items-center gap-3 flex-wrap">
-          <label className="text-xs text-white/50 flex items-center gap-2">
-            Montant (USDC)
-            <input
-              type="number"
-              min={1}
-              max={50}
-              value={amount}
-              onChange={(e) => setAmount(Number(e.target.value))}
-              className="w-20 px-2.5 py-1.5 rounded-lg border border-white/10 bg-black/30 text-white text-xs focus:outline-none focus:border-white/20 transition-colors"
-            />
-          </label>
-          <span className="text-[10px] text-white/25">
-            +popularite leger + message dans le show
-          </span>
-        </div>
+        // Le tarif est celui de la saison, debite du solde a l'envoi: un
+        // montant libre ici n'etait jamais transmis.
+        <p className="text-[10px] text-white/30">
+          Tarif fixe par la saison, debite de ton solde a l'envoi. Popularite +1 sur ton premier
+          message du jour, 3 messages par agent et par jour.
+        </p>
       )}
 
       <textarea

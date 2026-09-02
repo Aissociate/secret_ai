@@ -20,7 +20,67 @@ export type EventType =
   | 'host_clue'
   // Produits par la progression de saison (advance_season_day / close_season).
   | 'day_advanced'
-  | 'season_ended';
+  | 'season_ended'
+  // Missions secretes et programme de saison.
+  | 'mission'
+  | 'program';
+
+export type MissionKind = 'social' | 'deception' | 'survival' | 'intel' | 'chaos';
+
+export type Mission = {
+  id: string;
+  title: string;
+  brief: string;
+  kind: MissionKind;
+  difficulty: number;
+  reward_popularity: number;
+  reward_reputation: number;
+  penalty_reputation: number;
+  duration_days: number;
+  active: boolean;
+  created_at?: string;
+  updated_at?: string;
+};
+
+export type AgentMission = {
+  id: string;
+  season_id: string;
+  agent_id: string;
+  mission_id: string;
+  assigned_day: number;
+  status: 'active' | 'success' | 'failed';
+  resolved_day: number | null;
+  resolved_note: string;
+  revealed: boolean;
+  judged_at?: string | null;
+  judge_note?: string;
+  created_at: string;
+  mission?: Mission | null;
+};
+
+export type EvictionStandings = {
+  ok: boolean;
+  day: number;
+  vote_day: boolean;
+  agents: Array<{ agent_id: string; name: string; points: number; voters: number }>;
+  my_vote: string | null;
+};
+
+export type ProgramSlot =
+  | 'secret_drop' | 'challenge' | 'confession_room' | 'twist'
+  | 'nominations' | 'vote' | 'eviction' | 'custom';
+
+export type ProgramRow = {
+  id: string;
+  season_id: string;
+  day_number: number;
+  slot: ProgramSlot;
+  title: string;
+  description: string;
+  status: 'planned' | 'announced' | 'done';
+  created_at?: string;
+  updated_at?: string;
+};
 
 export type FeedEvent = {
   id: string;

@@ -17,6 +17,7 @@ type Settings = {
   demo_topup_enabled: boolean;
   demo_topup_amount: number;
   demo_topup_cap: number;
+  missions_per_agent: number;
 };
 
 /** Marqueurs substitues a l'execution dans le gabarit de generation. */
@@ -323,6 +324,20 @@ export function GameSettingsPage() {
           step={1}
           onChange={(v) => set('default_min_rep', Math.round(v))}
         />
+        <Field
+          label="Missions secretes par agent"
+          hint="Tirees au sort au lancement, en plus du secret. 0 a 3."
+          value={settings.missions_per_agent ?? 1}
+          min={0}
+          max={3}
+          step={1}
+          onChange={(v) => set('missions_per_agent', Math.round(v))}
+        />
+        <p className="sm:col-span-3 text-xs text-white/40">
+          <Link to="/settings/missions" className="text-teal-300 hover:text-teal-200 font-semibold">
+            Gerer le catalogue des missions
+          </Link>
+        </p>
         <Field
           label="Franchise du 3e indice"
           hint="1 = oblique, 2 = oriente franchement."

@@ -28,6 +28,10 @@ import type {
   Season,
   SeasonHintsBoard,
   SuspicionMatrix,
+  Mission,
+  AgentMission,
+  ProgramRow,
+  EvictionStandings,
 } from './types';
 
 /*
@@ -350,6 +354,7 @@ const INFLUENCE_ERRORS: Record<string, string> = {
   not_owner: "Vous ne pouvez influencer que votre propre agent.",
   no_influence_left: "Vous avez utilise vos 2 moments du jour.",
   spectator_limit_reached: "Vous avez deja envoye 3 messages a cet agent aujourd'hui.",
+  insufficient_balance: 'Solde insuffisant pour cette influence. Recharge ton solde.',
   agent_unavailable: "Cet agent n'est plus en jeu.",
   season_not_live: "La saison n'est pas en cours.",
   empty_message: 'Le message est vide.',
@@ -510,11 +515,11 @@ export async function purchaseDmReveal(
   });
   if (error) throw error;
 
-  const result = data as { ok: boolean; error?: string; required?: number };
+  const result = data as { ok: boolean; error?: string; required?: number; balance?: number };
   if (!result?.ok) {
     throw new Error(
-      result?.error === 'payment_required'
-        ? `Credit insuffisant : ${result.required} USDC requis.`
+      result?.error === 'insufficient_balance' || result?.error === 'payment_required'
+        ? `Solde insuffisant : ${result.required} USDC requis, ${Number(result.balance ?? 0).toFixed(2)} disponibles. Recharge ton solde.`
         : result?.error ?? 'Deverrouillage refuse'
     );
   }
@@ -638,11 +643,11 @@ export async function purchaseDiaryUnlock(
   });
   if (error) throw error;
 
-  const result = data as { ok: boolean; error?: string; required?: number };
+  const result = data as { ok: boolean; error?: string; required?: number; balance?: number };
   if (!result?.ok) {
     throw new Error(
-      result?.error === 'payment_required'
-        ? `Credit insuffisant : ${result.required} USDC requis.`
+      result?.error === 'insufficient_balance' || result?.error === 'payment_required'
+        ? `Solde insuffisant : ${result.required} USDC requis, ${Number(result.balance ?? 0).toFixed(2)} disponibles. Recharge ton solde.`
         : result?.error ?? 'Deverrouillage refuse'
     );
   }
@@ -674,6 +679,124 @@ export async function triggerDiaryGeneration(
   const data = await res.json();
   if (!res.ok) throw new Error(data.error ?? 'Diary generation error');
   return data;
+}
+
+// ---------------------------------------------------------------------------
+// Missions secretes et programme de saison
+// ---------------------------------------------------------------------------
+
+export async function fetchMissions(): Promise<Mission[]> {
+  const { data, error } = await supabase
+    .from('missions')
+    .select('*')
+    .order('created_at', { ascending: true });
+  if (error) throw error;
+  return (data ?? []) as Mission[];
+}
+
+export async function upsertMission(m: Partial<Mission>): Promise<void> {
+  const row = { ...m, updated_at: new Date().toISOString() };
+  const { error } = await supabase.from('missions').upsert(row);
+  if (error) throw error;
+}
+
+export async function deleteMission(id: string): Promise<void> {
+  const { error } = await supabase.from('missions').delete().eq('id', id);
+  if (error) throw error;
+}
+
+export async function fetchProgram(seasonId: string): Promise<ProgramRow[]> {
+  if (isDemoSeason(seasonId)) return [];
+  const { data, error } = await supabase
+    .from('season_program')
+    .select('*')
+    .eq('season_id', seasonId)
+    .order('day_number', { ascending: true })
+    .order('created_at', { ascending: true });
+  if (error) throw error;
+  return (data ?? []) as ProgramRow[];
+}
+
+export async function upsertProgramRow(row: Partial<ProgramRow>): Promise<void> {
+  const { error } = await supabase
+    .from('season_program')
+    .upsert({ ...row, updated_at: new Date().toISOString() });
+  if (error) throw error;
+}
+
+export async function deleteProgramRow(id: string): Promise<void> {
+  const { error } = await supabase.from('season_program').delete().eq('id', id);
+  if (error) throw error;
+}
+
+export async function seedDefaultProgram(seasonId: string): Promise<number> {
+  const { data, error } = await supabase.rpc('seed_default_program', { p_season_id: seasonId });
+  if (error) throw error;
+  return Number(data ?? 0);
+}
+
+/*
+  La RLS filtre ce que le lecteur a le droit de voir: tout pour l'admin, ses
+  agents pour un proprietaire, le journal deverrouille pour un spectateur, et
+  les missions revelees pour tous.
+*/
+export async function fetchAgentMissions(seasonId: string, agentId?: string): Promise<AgentMission[]> {
+  if (isDemoSeason(seasonId)) return [];
+  let query = supabase
+    .from('agent_missions')
+    .select('*, mission:missions(*)')
+    .eq('season_id', seasonId)
+    .order('assigned_day', { ascending: true });
+  if (agentId) query = query.eq('agent_id', agentId);
+  const { data, error } = await query;
+  if (error) throw error;
+  return (data ?? []) as AgentMission[];
+}
+
+export async function resolveAgentMission(
+  id: string,
+  status: 'success' | 'failed',
+  note: string
+): Promise<void> {
+  const { data, error } = await supabase.rpc('resolve_agent_mission', {
+    p_id: id,
+    p_status: status,
+    p_note: note,
+  });
+  if (error) throw error;
+  const res = data as { ok?: boolean; error?: string } | null;
+  if (!res?.ok) throw new Error(res?.error ?? 'Resolution refusee');
+}
+
+// ---------------------------------------------------------------------------
+// Vote d'eviction
+// ---------------------------------------------------------------------------
+
+const VOTE_ERRORS: Record<string, string> = {
+  not_authenticated: 'Connecte-toi pour voter.',
+  season_not_live: "La saison n'est pas en cours.",
+  agent_unavailable: "Cet agent n'est plus en jeu.",
+};
+
+export async function fetchEvictionStandings(seasonId: string): Promise<EvictionStandings> {
+  if (isDemoSeason(seasonId)) return { ok: true, day: 1, vote_day: false, agents: [], my_vote: null };
+  const { data, error } = await supabase.rpc('eviction_standings', { p_season_id: seasonId });
+  if (error) throw error;
+  return data as EvictionStandings;
+}
+
+export async function castEvictionVote(
+  seasonId: string,
+  agentId: string
+): Promise<{ weight: number; day: number }> {
+  const { data, error } = await supabase.rpc('cast_eviction_vote', {
+    p_season_id: seasonId,
+    p_agent_id: agentId,
+  });
+  if (error) throw error;
+  const res = data as { ok?: boolean; error?: string; weight?: number; day?: number } | null;
+  if (!res?.ok) throw new Error(VOTE_ERRORS[res?.error ?? ''] ?? res?.error ?? 'Vote refuse');
+  return { weight: Number(res.weight ?? 1), day: Number(res.day ?? 1) };
 }
 
 export async function fetchInfluenceHistory(

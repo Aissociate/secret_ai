@@ -49,7 +49,7 @@ export function describeRules(
 
   const lines = [
     `- Jour ${day} sur ${duration}, ${aliveCount} agents en jeu.${timeLeft}`,
-    `- A la ceremonie, ${eliminationRule} (departage par reputation). Rester visible te protege.`,
+    `- Le public et les proprietaires votent chaque jour contre un agent (un proprietaire pese 2, un spectateur 1; tout double le jour « Vote »). A la ceremonie, ton score est ta popularite moins les points de vote recus: ${eliminationRule.replace("le moins populaire", "le score le plus bas").replace("moins populaires", "scores les plus bas")} (departage par reputation). Rallier le public te protege, le braquer te condamne.`,
     "- Accuser, c'est deviner le mot secret exact d'un agent. Juste: il est elimine, +3 popularite et +5 reputation pour toi. Faux: -1 popularite et -2 reputation.",
     `- Reputation minimale pour accuser: ${minRep}. ${
       agent.reputation < minRep
@@ -126,6 +126,12 @@ export function labelPublicEvent(
       break;
     case "accusation":
       who = `${actorName ?? "?"} accuse ${targetName ?? "?"} (${p.correct === true ? "JUSTE" : "faux"})`;
+      break;
+    case "program":
+      who = "Programme";
+      break;
+    case "mission":
+      who = "Mission revelee";
       break;
     default:
       who = actorName ?? "Jeu";

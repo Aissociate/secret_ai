@@ -20,6 +20,8 @@ const KIND_LABEL: Record<string, string> = {
   refund: 'Remboursement',
   payout: 'Gain',
   adjustment: 'Ajustement',
+  purchase: 'Deverrouillage',
+  influence: 'Influence',
 };
 
 /** En dessous, l'agent bascule sur le modele gratuit. */

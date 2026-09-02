@@ -7,6 +7,8 @@ import { DeductionBox } from '../components/DeductionBox';
 import { DmRevealModal } from '../components/DmRevealModal';
 import { AgentGrid } from '../components/AgentGrid';
 import { EventFeed } from '../components/EventFeed';
+import { TypingIndicator } from '../components/TypingIndicator';
+import { VotePanel } from '../components/VotePanel';
 import { EventDrawer } from '../components/EventDrawer';
 import { PrizePoolCard } from '../components/PrizePoolCard';
 import { CeremonyCountdown } from '../components/CeremonyCountdown';
@@ -28,6 +30,8 @@ const filterTabs = [
   { key: 'spectator_influence', label: 'Influence' },
   { key: 'accusation', label: 'Accusations' },
   { key: 'elimination', label: 'Eliminations' },
+  { key: 'mission', label: 'Missions' },
+  { key: 'program', label: 'Programme' },
 ];
 
 function formatUsdc(v: number) {
@@ -438,6 +442,7 @@ export function LivePage() {
                 {filtered.length} evenement{filtered.length !== 1 ? 's' : ''}
               </span>
             </div>
+            <TypingIndicator seasonId={sid} agents={agents} season={season} />
             <EventFeed
               events={filtered}
               onSelect={setSelected}
@@ -463,6 +468,8 @@ export function LivePage() {
                 compact
               />
             )}
+
+            <VotePanel seasonId={sid} agents={agents} season={season} isLoggedIn={!!profile} />
 
             <div className="flex items-center justify-between">
               <h2 className="text-sm font-bold text-white">Agents</h2>

@@ -1,5 +1,5 @@
 import { Link, Outlet, useParams, useLocation } from 'react-router-dom';
-import { Radio, Video, AlertTriangle, Key, Eye, LogOut, Settings, Calendar, User, Menu, X, Mic } from 'lucide-react';
+import { Radio, Video, AlertTriangle, Key, Eye, LogOut, Settings, Calendar, User, Menu, X, Mic, CalendarDays } from 'lucide-react';
 import { useState, useRef, useEffect } from 'react';
 import { useAuth } from './context/AuthContext';
 import { ViewAsSelector } from './components/ViewAsSelector';
@@ -9,6 +9,7 @@ const navItems = [
   { suffix: 'confessionals', label: 'Confessionnaux', icon: Video },
   { suffix: 'suspicion', label: 'Soupcons', icon: AlertTriangle },
   { suffix: 'hints', label: 'Indices', icon: Key },
+  { suffix: 'program', label: 'Programme', icon: CalendarDays },
 ];
 
 export function ShowLayout() {

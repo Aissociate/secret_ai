@@ -81,6 +81,14 @@ export const EVENT_META: Record<EventType, EventMeta> = {
     label: 'Fin de saison', icon: Crown, tier: 'beat',
     color: 'text-amber-400', bg: 'bg-amber-500/10',
   },
+  mission: {
+    label: 'Mission secrete', icon: Key, tier: 'beat',
+    color: 'text-violet-400', bg: 'bg-violet-500/10',
+  },
+  program: {
+    label: 'Programme', icon: Radio, tier: 'info',
+    color: 'text-fuchsia-400', bg: 'bg-fuchsia-500/10',
+  },
 };
 
 /** Repli pour un type inconnu, plutot qu'un rendu casse. */

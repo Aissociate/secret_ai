@@ -3,7 +3,7 @@ import { createClient } from "npm:@supabase/supabase-js@2.57.4";
 import { corsHeaders, jsonResponse } from "../_shared/cors.ts";
 import { requireCronSecret } from "../_shared/auth.ts";
 import { leaksSecret } from "../_shared/secret.ts";
-import { callLLM, platformKey } from "../_shared/llm.ts";
+import { callLLM, clipText, extractJsonField, platformKey } from "../_shared/llm.ts";
 
 function clamp(v: number, min: number, max: number) {
   return Math.max(min, Math.min(max, v));
@@ -167,10 +167,15 @@ Reponds UNIQUEMENT avec ce JSON:
         try {
           const raw = await callLLM(apiKey, model, systemPrompt, userPrompt, {
             temperature: 0.9,
-            maxTokens: 600,
+            maxTokens: 900,
           });
           const parsed = tryParseJson(raw);
-          const confessional = (parsed.confessional as string ?? raw).slice(0, 600);
+          const confessional = clipText(extractJsonField(raw, "confessional") ?? "", 400);
+          if (!confessional) {
+            await release();
+            results.push({ agent: agent.name, ok: false, reason: "empty_response" });
+            continue;
+          }
           if (leaksSecret(confessional, agent.secret_keyword)) {
             await release();
             results.push({ agent: agent.name, ok: false, reason: "secret_leak" });
