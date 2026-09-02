@@ -37,6 +37,13 @@ const ACCUSATIONS_LIMIT = 20;
   journaliers viennent de game_limits; ces valeurs ne servent qu'en secours.
 */
 const AGENT_COOLDOWN_MS = 90 * 1000;
+/*
+  Etalement du quota sur la journee. Sans cela, un agent brulait ses 200
+  actions en cinq heures et la maison restait muette jusqu'a la ceremonie.
+  PACE_BURST autorise une avance, pour que la journee demarre par une salve
+  au lieu d'un goutte-a-goutte.
+*/
+const PACE_BURST = 0.12;
 const MAX_AGENTS_PER_TICK = 4;
 const MAX_REPLIES_PER_TICK = 2;
 const DEFAULT_LIMITS: Record<string, number> = {
@@ -765,9 +772,9 @@ Reponds UNIQUEMENT avec ce JSON:
       visibility: "public",
     });
 
-    await supabase.from("agents")
-      .update({ popularity: clamp(agent.popularity + 1, 0, 100) })
-      .eq("id", agent.id);
+    // Parler ne fait plus la popularite: dix prises de parole valent un point,
+    // le reste vient du public (reactions, commentaires, tips, votes).
+    await supabase.rpc("award_activity_popularity", { p_agent_id: agent.id, p_weight: 1 });
 
     /*
       Le panneau proprietaire affiche « suivie / ignoree / detournee » pour
@@ -809,11 +816,10 @@ Reponds UNIQUEMENT avec ce JSON:
     });
 
     await supabase.from("agents")
-      .update({
-        popularity: clamp(agent.popularity + 2, 0, 100),
-        confessional_count: (agent.confessional_count ?? 0) + 1,
-      })
+      .update({ confessional_count: (agent.confessional_count ?? 0) + 1 })
       .eq("id", agent.id);
+
+    await supabase.rpc("award_activity_popularity", { p_agent_id: agent.id, p_weight: 2 });
 
     await resolveInfluences(
       supabase,
@@ -1590,6 +1596,35 @@ ${evidence}`
 }
 
 /*
+  L'agent est-il dans les temps? On compare la part de son quota deja
+  consommee a la part de la journee ecoulee. Un agent en avance se tait le
+  temps que la journee le rattrape; repondre a une interpellation reste
+  toujours permis, sinon une conversation resterait en suspens.
+*/
+function paceAllows(
+  season: Record<string, unknown>,
+  todayCounts: Record<string, number>,
+  limits: Record<string, number>
+): boolean {
+  const startedAt = season.day_started_at ? new Date(season.day_started_at as string).getTime() : 0;
+  if (!startedAt) return true;
+
+  const durationMs = Math.max(Number(season.day_duration_hours ?? 24), 1) * 3_600_000;
+  const elapsed = Math.min(1, Math.max(0, (Date.now() - startedAt) / durationMs));
+
+  const total =
+    (limits.public_chat ?? 0) + (limits.private_dm ?? 0) +
+    (limits.confessional ?? 0) + (limits.accusation ?? 0);
+  if (total <= 0) return true;
+
+  const used =
+    (todayCounts.public_chat ?? 0) + (todayCounts.private_dm ?? 0) +
+    (todayCounts.confessional ?? 0) + (todayCounts.accusation ?? 0);
+
+  return used / total <= Math.min(1, elapsed + PACE_BURST);
+}
+
+/*
   Qui a ete interpelle sans avoir encore repondu. Pour chaque agent vivant, le
   message public ou l'accusation le visant le plus recent, s'il est posterieur
   a sa derniere prise de parole publique. Les evenements arrivent du plus
@@ -1803,7 +1838,12 @@ Deno.serve(async (req: Request) => {
         .slice(0, MAX_REPLIES_PER_TICK);
       const replierIds = new Set(repliers.map((a) => a.id));
       const others = aliveRows
-        .filter((a) => !replierIds.has(a.id) && !recentActorIds.has(a.id))
+        .filter(
+          (a) =>
+            !replierIds.has(a.id) &&
+            !recentActorIds.has(a.id) &&
+            paceAllows(season, dailyCountsMap[a.id] ?? {}, limits)
+        )
         .sort(() => Math.random() - 0.5);
       const batch = [...repliers, ...others].slice(0, MAX_AGENTS_PER_TICK);
 

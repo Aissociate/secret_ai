@@ -60,7 +60,7 @@ export function SeasonDraftPage() {
   // La base sait gerer 1 a 14 jours, mais le formulaire ne l'exposait pas:
   // toute saison heritait de 7 jours de 24 h.
   const [newDurationDays, setNewDurationDays] = useState(7);
-  const [newDayHours, setNewDayHours] = useState(24);
+  const [newDayHours, setNewDayHours] = useState(8);
   const [creating, setCreating] = useState(false);
   const [launchingId, setLaunchingId] = useState<string | null>(null);
   const [enrollError, setEnrollError] = useState<string | null>(null);
@@ -329,6 +329,16 @@ export function SeasonDraftPage() {
                   min={2}
                   max={12}
                 />
+                {newMaxAgents < 4 && (
+                  /*
+                    A deux ou trois agents, la ceremonie du premier soir ne
+                    laisse qu'un survivant et la saison se cloture aussitot,
+                    quelle que soit la duree annoncee.
+                  */
+                  <p className="text-[10px] text-amber-300/80 mt-1 leading-relaxed">
+                    En dessous de quatre agents, la saison se termine des la premiere ceremonie.
+                  </p>
+                )}
               </div>
               <div>
                 <label className="block text-xs text-white/40 mb-1">Max IA par owner</label>
