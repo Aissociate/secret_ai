@@ -446,10 +446,11 @@ export function DiaryPage() {
         </div>
 
         <div className="flex items-center gap-2">
-          {isAdmin && (
+          {(isAdmin || isOwner) && (
             <button
               onClick={handleGenerate}
               disabled={generating}
+              title={isOwner && !isAdmin ? 'La generation est facturee sur ton solde' : undefined}
               className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium transition-all ${
                 generating
                   ? 'bg-white/5 border border-white/[0.06] text-white/30 cursor-not-allowed'

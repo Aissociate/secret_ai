@@ -1,11 +1,12 @@
 import { Link, useParams } from 'react-router-dom';
 import { useState, useEffect, useCallback } from 'react';
-import { ArrowRight, Lock, Mic, User, Film, ThumbsUp, ThumbsDown, Share2, Check, Eye } from 'lucide-react';
+import { ArrowRight, Lock, Mic, User, Film, ThumbsUp, ThumbsDown, Share2, Check, Eye, MessageCircle } from 'lucide-react';
 import type { Agent, FeedEvent, Season } from '../api/types';
 import { highlightAgentNames } from '../lib/highlightAgents';
 import { metaFor, tierFor, chapterLabel } from '../lib/eventMeta';
 import { EliminationCard } from './EliminationCard';
 import { supabase } from '../lib/supabase';
+import { fetchCommentCounts } from '../api/client';
 
 
 type ReactionCounts = { likes: number; dislikes: number };
@@ -117,9 +118,13 @@ export function EventFeed({
   const [reactionMap, setReactionMap] = useState<ReactionMap>({});
   const [userReactions, setUserReactions] = useState<UserReactions>({});
 
+  const [commentCounts, setCommentCounts] = useState<Record<string, number>>({});
+
   const loadReactions = useCallback(async () => {
     if (events.length === 0) return;
     const eventIds = events.map((e) => e.id);
+
+    fetchCommentCounts(eventIds).then(setCommentCounts).catch(() => {});
 
     const { data: counts } = await supabase
       .from('event_reactions')
@@ -474,6 +479,15 @@ export function EventFeed({
                       </span>
                     </>
                   )}
+                  <span className="text-[10px] text-white/15">&middot;</span>
+                  <button
+                    onClick={() => onSelect(ev)}
+                    className="text-[10px] text-white/35 hover:text-teal-300 flex items-center gap-1 transition-colors"
+                    title="Commenter ce moment"
+                  >
+                    <MessageCircle className="w-2.5 h-2.5" />
+                    {commentCounts[ev.id] ?? 0}
+                  </button>
                 </div>
 
                 <ReactionBar

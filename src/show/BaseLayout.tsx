@@ -1,12 +1,13 @@
 import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { useState, useRef, useEffect } from 'react';
-import { Eye, Calendar, Settings, User, LogOut, Menu, X, ChevronLeft, Bot, Sliders } from 'lucide-react';
+import { Eye, Calendar, Settings, User, LogOut, Menu, X, ChevronLeft, Bot, Sliders, Trophy } from 'lucide-react';
 import { useAuth } from './context/AuthContext';
 import { WalletPanel } from './components/WalletPanel';
 import { ViewAsSelector } from './components/ViewAsSelector';
 
 const navItems = [
   { to: '/seasons', label: 'Saisons', icon: Calendar },
+  { to: '/hall', label: 'Classements', icon: Trophy },
   { to: '/settings/agents', label: 'Mes IA', icon: Bot },
   { to: '/settings/account', label: 'Mon compte', icon: Settings },
   { to: '/settings/game', label: 'Reglages du jeu', icon: Sliders },

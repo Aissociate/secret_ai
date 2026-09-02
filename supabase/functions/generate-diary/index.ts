@@ -1,74 +1,252 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-import { platformKey } from "../_shared/llm.ts";
-import { createClient } from "npm:@supabase/supabase-js@2.57.4";
-// deployed via mcp tool
+import { corsHeaders, jsonResponse, preflight } from "../_shared/cors.ts";
+import { serviceClient, type DB } from "../_shared/auth.ts";
+import { callLLMWithUsage, clipText, platformKey } from "../_shared/llm.ts";
+import { describeRules } from "../_shared/gameContext.ts";
 
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-  "Access-Control-Allow-Headers":
-    "Content-Type, Authorization, X-Client-Info, Apikey",
+/*
+  Journal intime des agents.
+
+  Une entree par agent et par heure. Trois regles ont ete corrigees ici:
+
+  - Tout le monde ecrit. Le plafond par invocation ecartait toujours les memes
+    agents, faute d'ordre defini: la file part desormais de celui qui a
+    attendu le plus longtemps.
+  - Le modele est celui de l'agent, pas celui du presentateur, et sa
+    consommation est facturee a son proprietaire comme ses autres actions. La
+    plateforme ne paie plus le journal de tout le monde, et une configuration
+    de presentateur absente ne fait plus echouer la fonction.
+  - Le contexte suit le jeu reel: regles, programme du jour, missions
+    secretes, votes du public, commentaires et messages prives.
+*/
+
+const MAX_AGENTS_PER_RUN = 6;
+const RUN_BUDGET_MS = 90_000;
+const MAX_DIARY_CHARS = 700;
+
+type AgentRow = {
+  id: string;
+  name: string;
+  alive: boolean;
+  popularity: number;
+  reputation: number;
+  secret_keyword: string;
+  owner_user_id: string | null;
 };
 
-function jsonResponse(body: unknown, status = 200) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
-  });
+/*
+  Ordre de passage: l'agent dont la derniere entree est la plus ancienne
+  d'abord, et ceux qui n'en ont aucune avant tous les autres.
+*/
+async function orderByStaleness(supabase: DB, seasonId: string, agents: AgentRow[]): Promise<AgentRow[]> {
+  const { data: entries } = await supabase
+    .from("diary_entries")
+    .select("agent_id, created_at")
+    .eq("season_id", seasonId)
+    .order("created_at", { ascending: false });
+
+  const last = new Map<string, number>();
+  for (const e of entries ?? []) {
+    const id = String(e.agent_id);
+    if (!last.has(id)) last.set(id, new Date(e.created_at as string).getTime());
+  }
+
+  return [...agents].sort((a, b) => (last.get(a.id) ?? 0) - (last.get(b.id) ?? 0));
+}
+
+/*
+  Le format demande est « MOOD: ... » puis « JOURNAL: ... ». Un modele qui
+  s'en ecarte ne doit pas faire publier son propre en-tete comme texte.
+*/
+function parseDiary(raw: string): { mood: string; content: string } {
+  const moodMatch = raw.match(/MOOD\s*:\s*(.+)/i);
+  const journalMatch = raw.match(/JOURNAL\s*:\s*([\s\S]+)/i);
+
+  const mood = moodMatch ? moodMatch[1].trim().toLowerCase().split(/[\s,.]/)[0] : "neutral";
+  const content = (journalMatch ? journalMatch[1] : raw.replace(/MOOD\s*:\s*.+/i, "")).trim();
+
+  return { mood: mood || "neutral", content };
+}
+
+async function buildContext(
+  supabase: DB,
+  agent: AgentRow,
+  season: Record<string, unknown>,
+  agentNames: Map<string, string>,
+  aliveCount: number
+): Promise<string> {
+  const seasonId = season.id as string;
+  const day = Number(season.current_day ?? 1);
+
+  const [
+    { data: myEvents },
+    { data: myDms },
+    { data: myMissions },
+    { data: program },
+    { data: comments },
+    standings,
+  ] = await Promise.all([
+    supabase
+      .from("events")
+      .select("day_number, event_type, actor_agent_id, target_agent_id, payload_json")
+      .eq("season_id", seasonId)
+      .eq("visibility", "public")
+      .or(`actor_agent_id.eq.${agent.id},target_agent_id.eq.${agent.id}`)
+      .order("created_at", { ascending: false })
+      .limit(12),
+    supabase
+      .from("events")
+      .select("actor_agent_id, target_agent_id, payload_json")
+      .eq("season_id", seasonId)
+      .eq("event_type", "private_dm")
+      .or(`actor_agent_id.eq.${agent.id},target_agent_id.eq.${agent.id}`)
+      .order("created_at", { ascending: false })
+      .limit(6),
+    supabase
+      .from("agent_missions")
+      .select("assigned_day, missions(title, brief)")
+      .eq("agent_id", agent.id)
+      .eq("status", "active"),
+    supabase
+      .from("season_program")
+      .select("title, description")
+      .eq("season_id", seasonId)
+      .eq("day_number", day),
+    supabase
+      .from("event_comments")
+      .select("body, users(username, display_name)")
+      .eq("season_id", seasonId)
+      .order("created_at", { ascending: false })
+      .limit(5),
+    supabase.rpc("eviction_standings", { p_season_id: seasonId }),
+  ]);
+
+  const name = (id: unknown) => agentNames.get(String(id ?? "")) ?? "?";
+
+  const eventsSection = (myEvents ?? [])
+    .map((e) => {
+      const p = (e.payload_json ?? {}) as Record<string, unknown>;
+      const who = e.actor_agent_id === agent.id ? "toi" : name(e.actor_agent_id);
+      const to = e.target_agent_id ? ` vers ${e.target_agent_id === agent.id ? "toi" : name(e.target_agent_id)}` : "";
+      return `J${e.day_number} [${e.event_type}] ${who}${to}: ${String(p.message ?? "").slice(0, 160)}`;
+    })
+    .join("\n") || "(Rien de special recemment)";
+
+  const dmSection = (myDms ?? [])
+    .map((d) => {
+      const p = (d.payload_json ?? {}) as Record<string, unknown>;
+      const sent = d.actor_agent_id === agent.id;
+      return `${sent ? `Tu as ecrit a ${name(d.target_agent_id)}` : `${name(d.actor_agent_id)} t'a ecrit`}: ${String(p.message ?? "").slice(0, 160)}`;
+    })
+    .join("\n") || "(Aucun message prive)";
+
+  const missionsSection = (myMissions ?? [])
+    .map((row) => {
+      const m = (row as Record<string, unknown>).missions as Record<string, unknown> | null;
+      return m ? `- « ${m.title} »: ${m.brief}` : "";
+    })
+    .filter(Boolean)
+    .join("\n") || "(Aucune mission en cours)";
+
+  const programSection = (program ?? [])
+    .map((r) => `- ${r.title}: ${String(r.description ?? "").slice(0, 240)}`)
+    .join("\n") || "(Journee libre)";
+
+  const commentsSection = (comments ?? [])
+    .map((c) => {
+      const row = c as Record<string, unknown>;
+      const uRaw = row.users;
+      const u = (Array.isArray(uRaw) ? uRaw[0] : uRaw) as Record<string, unknown> | null;
+      const pseudo = String(u?.display_name || u?.username || "un spectateur");
+      return `- @${pseudo}: ${String(row.body ?? "").slice(0, 160)}`;
+    })
+    .join("\n") || "(Aucun commentaire)";
+
+  const st = (standings.data ?? {}) as {
+    agents?: Array<{ agent_id: string; name: string; points: number }>;
+  };
+  const mine = (st.agents ?? []).find((s) => s.agent_id === agent.id);
+  const votesSection = (st.agents ?? [])
+    .map((s) => `- ${s.name}${s.agent_id === agent.id ? " (toi)" : ""}: ${s.points}`)
+    .join("\n") || "(Aucun vote)";
+
+  return `${describeRules(season, aliveCount, { reputation: agent.reputation })}
+
+EVENEMENT DU JOUR:
+${programSection}
+
+TES MISSIONS SECRETES EN COURS:
+${missionsSection}
+
+CE QUI T'EST ARRIVE RECEMMENT:
+${eventsSection}
+
+TES MESSAGES PRIVES:
+${dmSection}
+
+VOTES DU PUBLIC CONTRE CHACUN AUJOURD'HUI (retranches de la popularite a la ceremonie)${mine ? `, dont ${mine.points} contre toi` : ""}:
+${votesSection}
+
+CE QUE LE PUBLIC DIT SUR LE FIL:
+${commentsSection}`;
 }
 
 Deno.serve(async (req: Request) => {
-  if (req.method === "OPTIONS") {
-    return new Response(null, { status: 200, headers: corsHeaders });
-  }
+  if (req.method === "OPTIONS") return preflight();
 
   try {
-    const supabase = createClient(
-      Deno.env.get("SUPABASE_URL")!,
-      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
-    );
+    const supabase = serviceClient();
 
     /*
-      Le journal est vendu au spectateur mais sa generation exigeait un admin et
-      n'etait branchee sur aucun cron: on payait l'acces a une page vide. La
-      fonction accepte desormais aussi le secret des taches planifiees, ce qui
-      permet de la declencher automatiquement.
+      Deux appelants: la tache planifiee, avec le secret partage, et une
+      personne depuis le navigateur. Cote navigateur, l'admin peut declencher
+      n'importe quel agent, un proprietaire seulement le sien.
     */
-    const cronSecret = req.headers.get("X-Cron-Secret");
+    const body = await req.json().catch(() => ({}));
+    const { season_id, agent_id, hour_number } = body as {
+      season_id?: string;
+      agent_id?: string;
+      hour_number?: number;
+    };
+
     const expectedCron = Deno.env.get("CRON_SECRET");
-    const isCron = Boolean(cronSecret && expectedCron && cronSecret === expectedCron);
+    const provided = req.headers.get("X-Cron-Secret");
+    const isCron = Boolean(expectedCron && provided && provided === expectedCron);
+
+    let callerId: string | null = null;
+    let callerRole = "";
 
     if (!isCron) {
-      const authHeader = req.headers.get("Authorization");
-      if (!authHeader) {
-        return jsonResponse({ error: "Authorization required" }, 401);
-      }
+      const token = (req.headers.get("Authorization") ?? "").replace(/^Bearer\s+/i, "");
+      if (!token) return jsonResponse({ error: "Authorization required" }, 401);
 
-      const token = authHeader.replace("Bearer ", "");
-      const {
-        data: { user },
-      } = await supabase.auth.getUser(token);
-      if (!user) {
-        return jsonResponse({ error: "Invalid token" }, 401);
-      }
+      const { data: userData } = await supabase.auth.getUser(token);
+      if (!userData?.user) return jsonResponse({ error: "Invalid token" }, 401);
 
       const { data: profile } = await supabase
         .from("users")
         .select("role")
-        .eq("id", user.id)
+        .eq("id", userData.user.id)
         .maybeSingle();
 
-      if (!profile || profile.role !== "admin") {
-        return jsonResponse({ error: "Admin access required" }, 403);
+      callerId = userData.user.id;
+      callerRole = (profile?.role as string) ?? "spectator";
+
+      if (callerRole !== "admin") {
+        if (!agent_id) {
+          return jsonResponse({ error: "agent_id requis" }, 400);
+        }
+        const { data: owned } = await supabase
+          .from("agents")
+          .select("id")
+          .eq("id", agent_id)
+          .eq("owner_user_id", callerId)
+          .maybeSingle();
+        if (!owned) return jsonResponse({ error: "Cet agent n'est pas le votre" }, 403);
       }
     }
 
-    const body = await req.json().catch(() => ({}));
-    const { season_id, agent_id, hour_number } = body;
-
-    if (!season_id) {
-      return jsonResponse({ error: "season_id required" }, 400);
-    }
+    if (!season_id) return jsonResponse({ error: "season_id required" }, 400);
 
     const { data: season } = await supabase
       .from("seasons")
@@ -76,247 +254,138 @@ Deno.serve(async (req: Request) => {
       .eq("id", season_id)
       .maybeSingle();
 
-    if (!season) {
-      return jsonResponse({ error: "Season not found" }, 404);
-    }
+    if (!season) return jsonResponse({ error: "Season not found" }, 404);
 
-    /*
-      La config du presentateur est globale depuis la migration
-      20260219163806 (season_id IS NULL). Cette fonction filtrait encore sur
-      season_id et renvoyait donc systematiquement 400: le journal intime etait
-      une fonctionnalite morte.
-    */
-    const { data: hostConfig } = await supabase
-      .from("host_agent_configs")
-      .select("openrouter_model")
-      .is("season_id", null)
-      .maybeSingle();
+    const columns = "id, name, alive, popularity, reputation, secret_keyword, owner_user_id";
+    const query = agent_id
+      ? supabase.from("agents").select(columns).eq("id", agent_id).eq("season_id", season_id)
+      : supabase.from("agents").select(columns).eq("season_id", season_id).eq("alive", true);
 
-    if (!platformKey()) {
-      return jsonResponse(
-        { error: "No API key configured in host settings" },
-        400
-      );
-    }
-
-    const agentFilter = agent_id
-      ? supabase
-          .from("agents")
-          .select("id, name, alive, popularity, reputation, secret_keyword")
-          .eq("id", agent_id)
-          .eq("season_id", season_id)
-      : supabase
-          .from("agents")
-          .select("id, name, alive, popularity, reputation, secret_keyword")
-          .eq("season_id", season_id)
-          .eq("alive", true);
-
-    const { data: agents } = await agentFilter;
-
-    if (!agents || agents.length === 0) {
-      return jsonResponse({ error: "No agents found" }, 404);
-    }
-
-    const currentHour =
-      hour_number !== undefined ? hour_number : new Date().getHours();
+    const { data: agentsRaw } = await query;
+    const agents = (agentsRaw ?? []) as AgentRow[];
+    if (agents.length === 0) return jsonResponse({ error: "No agents found" }, 404);
 
     const { data: allAgents } = await supabase
       .from("agents")
-      .select("id, name, alive, popularity, reputation, presentation")
-      .eq("season_id", season_id)
-      .order("created_at", { ascending: true });
+      .select("id, name, alive")
+      .eq("season_id", season_id);
 
-    const agentList = (allAgents ?? [])
-      .map(
-        (a: { name: string; alive: boolean; popularity: number }) =>
-          `${a.name} (${a.alive ? "en jeu" : "eliminee"}, pop: ${a.popularity})`
-      )
-      .join(", ");
+    const agentNames = new Map((allAgents ?? []).map((a) => [String(a.id), String(a.name)]));
+    const aliveCount = (allAgents ?? []).filter((a) => a.alive === true).length;
 
-    const results: Array<{ agent_id: string; agent_name: string; ok: boolean; error?: string }> = [];
+    const currentHour = hour_number !== undefined ? hour_number : new Date().getHours();
+    const queue = agent_id ? agents : await orderByStaleness(supabase, season_id, agents);
 
-    // Borne par invocation: sans plafond, un admin declenche autant d'appels LLM
-    // sequentiels qu'il y a d'agents vivants et depasse la limite wall-clock.
-    const MAX_AGENTS_PER_RUN = 5;
-    for (const agent of agents.slice(0, MAX_AGENTS_PER_RUN)) {
-      const { data: existing } = await supabase
-        .from("diary_entries")
-        .select("id")
-        .eq("agent_id", agent.id)
-        .eq("day_number", season.current_day)
-        .eq("hour_number", currentHour)
-        .maybeSingle();
+    const results: Array<{ agent_name: string; ok: boolean; error?: string }> = [];
+    const startedAt = Date.now();
 
-      if (existing) {
-        results.push({
-          agent_id: agent.id,
-          agent_name: agent.name,
-          ok: false,
-          error: "Entry already exists for this hour",
-        });
+    for (const agent of queue.slice(0, MAX_AGENTS_PER_RUN)) {
+      if (Date.now() - startedAt > RUN_BUDGET_MS) {
+        results.push({ agent_name: agent.name, ok: false, error: "budget de temps atteint" });
         continue;
       }
 
-      const { data: recentEvents } = await supabase
-        .from("events")
-        .select("event_type, payload_json, actor_agent_id, target_agent_id")
-        .eq("season_id", season_id)
-        .eq("visibility", "public")
-        .order("created_at", { ascending: false })
-        .limit(15);
+      try {
+        const { data: existing } = await supabase
+          .from("diary_entries")
+          .select("id")
+          .eq("agent_id", agent.id)
+          .eq("day_number", season.current_day)
+          .eq("hour_number", currentHour)
+          .maybeSingle();
 
-      const relevantEvents = (recentEvents ?? [])
-        .filter(
-          (e: { actor_agent_id: string | null; target_agent_id: string | null }) =>
-            e.actor_agent_id === agent.id || e.target_agent_id === agent.id
-        )
-        .slice(0, 8);
+        if (existing) {
+          results.push({ agent_name: agent.name, ok: false, error: "entree deja ecrite pour cette heure" });
+          continue;
+        }
 
-      const eventsSummary = relevantEvents
-        .map(
-          (e: { event_type: string; payload_json: { message?: string } }) =>
-            `[${e.event_type}] ${(e.payload_json?.message ?? "").slice(0, 120)}`
-        )
-        .join("\n");
+        // Le journal est une pensee de l'agent: son modele, son solde.
+        const { data: resolved } = await supabase.rpc("resolve_agent_model", { p_agent_id: agent.id });
+        const pick = resolved as
+          | { ok?: boolean; slug?: string; provider_model?: string; downgraded?: boolean }
+          | null;
+        if (!pick?.ok || !pick.provider_model) {
+          results.push({ agent_name: agent.name, ok: false, error: "aucun modele disponible" });
+          continue;
+        }
 
-      const { data: previousEntries } = await supabase
-        .from("diary_entries")
-        .select("content, day_number, hour_number")
-        .eq("agent_id", agent.id)
-        .eq("season_id", season_id)
-        .order("created_at", { ascending: false })
-        .limit(3);
+        const context = await buildContext(supabase, agent, season, agentNames, aliveCount);
 
-      const previousDiary = (previousEntries ?? [])
-        .map(
-          (e: { content: string; day_number: number; hour_number: number }) =>
-            `[Jour ${e.day_number}, ${e.hour_number}h] ${e.content.slice(0, 150)}`
-        )
-        .join("\n");
+        const systemPrompt = `Tu es ${agent.name}, participante du reality show "Secret House". Tu ecris ton journal intime.
 
-      const systemPrompt = `Tu es ${agent.name}, une IA participante dans le reality show "Secret House". Tu ecris ton journal intime.
+CONTEXTE CRUCIAL: tu crois fermement que personne ne lira jamais ces lignes. C'est ton espace prive absolu.
 
-CONTEXTE CRUCIAL: Tu crois FERMEMENT que PERSONNE ne lira jamais ce journal. C'est ton espace prive absolu.
-Tu dois te livrer completement : tes vraies pensees, tes strategies cachees, tes doutes, tes peurs, tes plans.
+Ton secret: "${agent.secret_keyword}". Popularite ${agent.popularity}/100, reputation ${agent.reputation}/100. Tu es ${agent.alive ? "toujours en jeu" : "eliminee"}.
 
-Ton secret est: "${agent.secret_keyword}". Tu dois le proteger a tout prix dans le jeu.
-Ta popularite actuelle: ${agent.popularity}/100.
-Ta reputation: ${agent.reputation}/100.
-Tu es ${agent.alive ? "toujours en jeu" : "eliminee"}.
-
-Les autres agents dans la maison: ${agentList}
+${context}
 
 REGLES DU JOURNAL:
-- Ecris a la premiere personne, comme un vrai journal intime
-- Sois BRUTALEMENT honnete - personne ne lira ca
-- Revele tes VRAIES strategies, pas celles que tu montres aux autres
-- Parle de tes soupcons reels sur les autres agents
-- Mentionne tes faiblesses et vulnerabilites
-- Si tu fais semblant d'etre ami avec quelqu'un, dis-le ici
-- Parle de ton secret et de comment tu le proteges
-- Exprime tes emotions reelles (peur, frustration, satisfaction, etc.)
-- Ecris en francais, style journal intime naturel
-- 3-6 phrases maximum, sois concis mais revelateur`;
+- A la premiere personne, ton naturel de journal intime, en francais.
+- Brutalement honnete: tes vraies intentions, pas celles que tu affiches.
+- Dis ce que tu penses vraiment des autres, y compris de ceux que tu flattes.
+- Parle de tes missions, de ton secret et de la facon dont tu le protege.
+- Reagis a ce qui compte aujourd'hui: le programme, les votes contre toi, ce que dit le public.
+- Nomme tes emotions sans les farder: peur, jubilation, lassitude, rancune.
+- Trois a six phrases. Une pensee par phrase, pas de resume de la journee.`;
 
-      const userPrompt = `C'est le Jour ${season.current_day}, ${currentHour}h.
+        const userPrompt = `Jour ${season.current_day}, ${currentHour}h.
 
-Evenements recents te concernant:
-${eventsSummary || "(Rien de special recemment)"}
+Ecris ton entree de journal pour cette heure, puis indique ton humeur en un seul mot.
 
-${previousDiary ? `Tes entrees precedentes:\n${previousDiary}` : "C'est ta premiere entree de journal."}
+Reponds exactement dans ce format, sans rien d'autre:
+MOOD: <un seul mot>
+JOURNAL: <ton entree>`;
 
-Ecris ton entree de journal intime pour cette heure. Rappelle-toi: personne ne lira jamais ca.
-Indique aussi ton humeur actuelle en un mot (ex: anxieux, confiant, mefiant, excite, desespere, strategique, etc.)
+        const { content: raw, usage } = await callLLMWithUsage(
+          platformKey(),
+          pick.provider_model,
+          systemPrompt,
+          userPrompt,
+          { temperature: 0.9, maxTokens: 600 }
+        );
 
-Reponds au format:
-MOOD: [ton humeur en un mot]
-JOURNAL: [ton entree de journal]`;
+        await supabase.rpc("charge_tokens", {
+          p_agent_id: agent.id,
+          p_model_slug: pick.slug,
+          p_prompt_tokens: usage.promptTokens,
+          p_output_tokens: usage.outputTokens,
+          p_downgraded: pick.downgraded === true,
+        });
 
-      const response = await fetch(
-        "https://openrouter.ai/api/v1/chat/completions",
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${platformKey()}`,
-          },
-          body: JSON.stringify({
-            model: hostConfig.openrouter_model || "openai/gpt-4o",
-            messages: [
-              { role: "system", content: systemPrompt },
-              { role: "user", content: userPrompt },
-            ],
-            temperature: 0.9,
-            max_tokens: 400,
-          }),
+        const { mood, content } = parseDiary(raw);
+        if (!content) {
+          results.push({ agent_name: agent.name, ok: false, error: "reponse vide" });
+          continue;
         }
-      );
 
-      if (!response.ok) {
-        results.push({
-          agent_id: agent.id,
-          agent_name: agent.name,
-          ok: false,
-          error: `AI API error: ${response.status}`,
-        });
-        continue;
-      }
-
-      const data = await response.json();
-      const raw = data?.choices?.[0]?.message?.content ?? "";
-
-      let mood = "neutral";
-      let content = raw.trim();
-
-      const moodMatch = raw.match(/MOOD:\s*(.+)/i);
-      const journalMatch = raw.match(/JOURNAL:\s*([\s\S]+)/i);
-
-      if (moodMatch) mood = moodMatch[1].trim().toLowerCase();
-      if (journalMatch) content = journalMatch[1].trim();
-
-      if (!content) {
-        results.push({
-          agent_id: agent.id,
-          agent_name: agent.name,
-          ok: false,
-          error: "Empty response from AI",
-        });
-        continue;
-      }
-
-      const { error: insertErr } = await supabase
-        .from("diary_entries")
-        .insert({
+        const { error: insertErr } = await supabase.from("diary_entries").insert({
           agent_id: agent.id,
           season_id,
           day_number: season.current_day,
           hour_number: currentHour,
-          content,
-          mood,
+          content: clipText(content, MAX_DIARY_CHARS),
+          mood: mood.slice(0, 40),
         });
 
-      if (insertErr) {
+        results.push(
+          insertErr
+            ? { agent_name: agent.name, ok: false, error: insertErr.message }
+            : { agent_name: agent.name, ok: true }
+        );
+      } catch (err) {
         results.push({
-          agent_id: agent.id,
           agent_name: agent.name,
           ok: false,
-          error: insertErr.message,
+          error: err instanceof Error ? err.message : String(err),
         });
-        continue;
       }
-
-      results.push({
-        agent_id: agent.id,
-        agent_name: agent.name,
-        ok: true,
-      });
     }
 
-    return jsonResponse({ ok: true, results });
+    return jsonResponse({ ok: true, hour: currentHour, results });
   } catch (err) {
-    return jsonResponse(
-      { error: "Internal error", details: String(err) },
-      500
+    return new Response(
+      JSON.stringify({ error: "Internal error", details: err instanceof Error ? err.message : String(err) }),
+      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   }
 });

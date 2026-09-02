@@ -1,5 +1,5 @@
 import { Link, Outlet, useParams, useLocation } from 'react-router-dom';
-import { Radio, Video, AlertTriangle, Key, Eye, LogOut, Settings, Calendar, User, Menu, X, Mic, CalendarDays } from 'lucide-react';
+import { Radio, Video, AlertTriangle, Key, Eye, LogOut, Settings, Calendar, User, Menu, X, Mic, CalendarDays, Trophy } from 'lucide-react';
 import { useState, useRef, useEffect } from 'react';
 import { useAuth } from './context/AuthContext';
 import { ViewAsSelector } from './components/ViewAsSelector';
@@ -134,6 +134,14 @@ export function ShowLayout() {
                         >
                           <Calendar className="w-3.5 h-3.5" />
                           Saisons & Draft
+                        </Link>
+                        <Link
+                          to="/hall"
+                          onClick={() => setMenuOpen(false)}
+                          className="flex items-center gap-2 px-3 py-2 text-xs text-white/50 hover:text-white hover:bg-white/5 transition-all"
+                        >
+                          <Trophy className="w-3.5 h-3.5" />
+                          Classements
                         </Link>
                         {effectiveRole === 'admin' && (
                           <Link

@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { X, ArrowRight } from 'lucide-react';
 import type { Agent, FeedEvent } from '../api/types';
 import { highlightAgentNames } from '../lib/highlightAgents';
+import { CommentsThread } from './CommentsThread';
 
 export function EventDrawer({
   selected,
@@ -111,6 +112,8 @@ export function EventDrawer({
                 : '(no message)'}
             </div>
           </div>
+
+          <CommentsThread eventId={selected.id} />
 
           {!!(selected.payload_json as Record<string, unknown>)?.meta && (
             <div>

@@ -58,6 +58,62 @@ export type AgentMission = {
   mission?: Mission | null;
 };
 
+export type EventComment = {
+  id: string;
+  event_id: string;
+  season_id: string;
+  user_id: string;
+  display_name: string;
+  author_role?: string;
+  body: string;
+  created_at: string;
+};
+
+export type HallOfFameAgent = {
+  config_id: string;
+  name: string;
+  avatar_url: string | null;
+  owner_name: string;
+  seasons_played: number;
+  crowns: number;
+  accusations: number;
+  accusations_correct: number;
+  accuracy_pct: number | null;
+  gains_usdc: number;
+  times_unmasked: number;
+};
+
+export type HallOfFameOwner = {
+  user_id: string;
+  display_name: string;
+  agents_count: number;
+  seasons_played: number;
+  crowns: number;
+  accusations: number;
+  accusations_correct: number;
+  accuracy_pct: number | null;
+  gains_usdc: number;
+};
+
+export type HallOfFameSpectator = {
+  user_id: string;
+  display_name: string;
+  guesses: number;
+  guesses_correct: number;
+  accuracy_pct: number | null;
+  points: number;
+  first_bloods: number;
+  seasons_played: number;
+  comments: number;
+  votes: number;
+};
+
+export type HallOfFame = {
+  agents: HallOfFameAgent[];
+  owners: HallOfFameOwner[];
+  spectators: HallOfFameSpectator[];
+};
+
 export type EvictionStandings = {
   ok: boolean;
   day: number;

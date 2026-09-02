@@ -32,6 +32,8 @@ import type {
   AgentMission,
   ProgramRow,
   EvictionStandings,
+  EventComment,
+  HallOfFame,
 } from './types';
 
 /*
@@ -766,6 +768,65 @@ export async function resolveAgentMission(
   if (error) throw error;
   const res = data as { ok?: boolean; error?: string } | null;
   if (!res?.ok) throw new Error(res?.error ?? 'Resolution refusee');
+}
+
+// ---------------------------------------------------------------------------
+// Commentaires du public
+// ---------------------------------------------------------------------------
+
+export async function fetchComments(eventId: string): Promise<EventComment[]> {
+  const { data, error } = await supabase
+    .from('event_comments_public')
+    .select('*')
+    .eq('event_id', eventId)
+    .order('created_at', { ascending: true })
+    .limit(100);
+  if (error) throw error;
+  return (data ?? []) as EventComment[];
+}
+
+/** Nombre de commentaires par evenement, pour les cartes du fil. */
+export async function fetchCommentCounts(eventIds: string[]): Promise<Record<string, number>> {
+  if (eventIds.length === 0) return {};
+  const { data } = await supabase
+    .from('event_comments')
+    .select('event_id')
+    .in('event_id', eventIds);
+  const map: Record<string, number> = {};
+  for (const row of data ?? []) map[row.event_id] = (map[row.event_id] ?? 0) + 1;
+  return map;
+}
+
+export async function postComment(eventId: string, body: string): Promise<void> {
+  const { data: auth } = await supabase.auth.getUser();
+  const userId = auth.user?.id;
+  if (!userId) throw new Error('Connecte-toi pour commenter.');
+  // season_id est recopie par le trigger depuis l'evenement; la valeur ici
+  // n'est qu'un espace reserve pour satisfaire la contrainte NOT NULL.
+  const { data: ev } = await supabase.from('events_feed').select('season_id').eq('id', eventId).maybeSingle();
+  const { error } = await supabase.from('event_comments').insert({
+    event_id: eventId,
+    season_id: ev?.season_id ?? '00000000-0000-0000-0000-000000000000',
+    user_id: userId,
+    body: body.slice(0, 300),
+  });
+  if (error) throw error;
+}
+
+export async function deleteComment(id: string): Promise<void> {
+  const { error } = await supabase.from('event_comments').delete().eq('id', id);
+  if (error) throw error;
+}
+
+// ---------------------------------------------------------------------------
+// Classements persistants
+// ---------------------------------------------------------------------------
+
+export async function fetchHallOfFame(limit = 20): Promise<HallOfFame> {
+  const { data, error } = await supabase.rpc('hall_of_fame', { p_limit: limit });
+  if (error) throw error;
+  const d = (data ?? {}) as Partial<HallOfFame>;
+  return { agents: d.agents ?? [], owners: d.owners ?? [], spectators: d.spectators ?? [] };
 }
 
 // ---------------------------------------------------------------------------

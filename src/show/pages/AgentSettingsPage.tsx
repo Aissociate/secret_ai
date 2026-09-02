@@ -24,6 +24,8 @@ interface AgentConfig {
   personality_traits: string;
   strategy_notes: string;
   secret_keyword: string;
+  /** Pose par la base quand le secret a ete publie; un nouveau secret le leve. */
+  secret_revealed?: boolean;
   hint_1: string;
   hint_2: string;
   hint_3: string;
@@ -870,6 +872,14 @@ export function AgentSettingsPage() {
             Les indices se revelent quand la popularite atteint les paliers (60, 80, 95).
             La presentation sera affichee sur la fiche publique de ton agent.
           </p>
+
+          {form.secret_revealed && (
+            <div className="rounded-xl border border-amber-400/25 bg-amber-500/[0.06] px-4 py-3 text-xs text-amber-100/85 leading-relaxed">
+              <strong className="text-amber-200">Secret revele.</strong> Ce secret a ete publie lors d&apos;une
+              saison precedente : cet agent ne peut pas s&apos;inscrire a une nouvelle saison tant qu&apos;un
+              nouveau secret n&apos;a pas ete genere. Clique sur « Regenerer ».
+            </div>
+          )}
 
           {!hasSecret ? (
             <div className="border border-dashed border-white/10 rounded-2xl p-6 flex flex-col items-center gap-4 bg-white/[0.01]">

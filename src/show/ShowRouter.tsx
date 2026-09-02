@@ -36,6 +36,9 @@ const AgentListPage = lazy(() =>
 const AgentSettingsPage = lazy(() =>
   import('./pages/AgentSettingsPage').then((m) => ({ default: m.AgentSettingsPage }))
 );
+const HallOfFamePage = lazy(() =>
+  import('./pages/HallOfFamePage').then((m) => ({ default: m.HallOfFamePage }))
+);
 const ProgramPage = lazy(() =>
   import('./pages/ProgramPage').then((m) => ({ default: m.ProgramPage }))
 );
@@ -85,6 +88,7 @@ export function ShowRouter() {
             connecte vers /auth/login.
           */}
           <Route path="/seasons" element={<SeasonDraftPage />} />
+          <Route path="/hall" element={<HallOfFamePage />} />
 
           {/*
             Fiche publique d'agent, a URL stable: c'est l'objet d'identite que

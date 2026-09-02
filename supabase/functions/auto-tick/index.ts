@@ -298,6 +298,33 @@ async function buildAgentContext(
     .filter(Boolean)
     .join("\n") || "(Aucune mission en cours)";
 
+  // Commentaires du public sur le fil: la maison les entend, l'agent peut y repondre.
+  const { data: publicComments } = await supabase
+    .from("event_comments")
+    .select("body, created_at, users(username, display_name), events(event_type, actor_agent_id, target_agent_id)")
+    .eq("season_id", seasonId)
+    .order("created_at", { ascending: false })
+    .limit(8);
+
+  const commentsSection = (publicComments ?? [])
+    .map((c) => {
+      const row = c as Record<string, unknown>;
+      const uRaw = row.users;
+      const u = (Array.isArray(uRaw) ? uRaw[0] : uRaw) as Record<string, unknown> | null;
+      const eRaw = row.events;
+      const ev = (Array.isArray(eRaw) ? eRaw[0] : eRaw) as Record<string, unknown> | null;
+      const pseudo = String(u?.display_name || u?.username || "un spectateur");
+      const actor = ev?.actor_agent_id ? nameMap.get(String(ev.actor_agent_id)) : null;
+      const target = ev?.target_agent_id ? nameMap.get(String(ev.target_agent_id)) : null;
+      const about = actor
+        ? `sur un ${ev?.event_type} de ${actor}`
+        : target
+          ? `a propos de ${target}`
+          : "sur le fil";
+      return `- @${pseudo} (${about}): ${String(row.body ?? "").slice(0, 200)}`;
+    })
+    .join("\n") || "(Aucun commentaire)";
+
   // Votes d'eviction du jour: le public agit sur la ceremonie, l'agent doit le savoir.
   const { data: standingsRaw } = await supabase.rpc("eviction_standings", { p_season_id: seasonId });
   const standings = (standingsRaw ?? {}) as {
@@ -434,6 +461,9 @@ ${missionsSection}
 
 ${votesHeader}
 ${votesSection}
+
+COMMENTAIRES DU PUBLIC SUR LE FIL (les plus recents; tu peux repondre a celui qui te concerne en citant @pseudo):
+${commentsSection}
 
 AGENTS DANS LA MAISON:
 ${agentList}
@@ -696,6 +726,7 @@ Reponds UNIQUEMENT avec ce JSON:
 {"message": "<max ${MAX_CHAT_CHARS} chars, 1 a 3 phrases>", "targets": ["${reply.from.name}"], "tone": "<friendly|neutral|suspicious|provocative>", "influence_outcome": "<followed|ignored|diverted>"}`
       : `Genere un message pour le chat public. C'est un plateau de tele-realite: du rythme, du culot, de l'emotion.
 Reagis a ce qui vient d'etre dit, interpelle quelqu'un par son nom, provoque, taquine, defends-toi, propose une alliance ou seme le doute. Une seule idee forte. Ne resume pas la situation, ne repete pas tes messages precedents.
+Si un commentaire du public te concerne, te provoque ou te soutient, tu peux lui repondre en citant @pseudo, comme a un spectateur en plateau.
 ${influenceNote}
 Reponds UNIQUEMENT avec ce JSON:
 {"message": "<max ${MAX_CHAT_CHARS} chars, 1 a 3 phrases>", "targets": ["<1-2 noms>"], "tone": "<friendly|neutral|suspicious|provocative>", "influence_outcome": "<followed|ignored|diverted>"}`;
