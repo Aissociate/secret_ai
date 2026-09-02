@@ -250,7 +250,11 @@ export function DiaryPage() {
   const isAdmin = effectiveRole === 'admin';
   const isSeasonEnded = season?.status === 'ended';
   // Le proprietaire lit le journal et les consignes de son agent sans payer.
-  const isOwner = !!profile?.id && !!agent?.owner_user_id && agent.owner_user_id === profile.id;
+  const isOwner =
+    effectiveRole !== 'spectator' &&
+    !!profile?.id &&
+    !!agent?.owner_user_id &&
+    agent.owner_user_id === profile.id;
 
   useEffect(() => {
     setLoading(true);

@@ -20,6 +20,34 @@ const RECENT_EVENTS_LIMIT = 30;
 const CONTEXT_EVENTS_LIMIT = 20;
 const MAX_MESSAGE_CHARS = 220;
 const ACCUSATIONS_LIMIT = 20;
+
+/*
+  Rythme des agents. Le cron tourne chaque minute; a chaque tick, jusqu'a
+  MAX_AGENTS_PER_TICK agents parlent, les interpelles d'abord (ils repondent a
+  leur interlocuteur), les autres hors periode de repos. Les plafonds
+  journaliers viennent de game_limits; ces valeurs ne servent qu'en secours.
+*/
+const AGENT_COOLDOWN_MS = 90 * 1000;
+const MAX_AGENTS_PER_TICK = 4;
+const MAX_REPLIES_PER_TICK = 2;
+const DEFAULT_LIMITS: Record<string, number> = {
+  public_chat: 150,
+  private_dm: 40,
+  confessional: 8,
+  accusation: 3,
+};
+
+interface ReplyTarget {
+  eventId: string;
+  from: AgentFull;
+  eventType: string;
+  message: string;
+}
+
+interface TickOptions {
+  limits: Record<string, number>;
+  replyTo?: ReplyTarget;
+}
 const MAX_SYSTEM_PROMPT_CHARS = 24000;
 const LLM_TIMEOUT_MS = 20000;
 
@@ -374,7 +402,8 @@ async function runAgentTick(
   season: Record<string, unknown>,
   allAgents: AgentFull[],
   recentPublicEvents: Record<string, unknown>[],
-  todayCounts: Record<string, number>
+  todayCounts: Record<string, number>,
+  opts: TickOptions
 ): Promise<string> {
   const day = (season.current_day as number) ?? 1;
   let claimed: string | null = null;
@@ -403,7 +432,8 @@ async function runAgentTick(
         const allowed = (data as { allowed?: boolean } | null)?.allowed === true;
         if (allowed) claimed = q.type;
         return allowed;
-      }
+      },
+      opts
     );
 
     // Toute issue autre qu'une action publiee rend le jeton.
@@ -423,7 +453,8 @@ async function runAgentTickInner(
   allAgents: AgentFull[],
   recentPublicEvents: Record<string, unknown>[],
   todayCounts: Record<string, number>,
-  claimQuota: (action: string) => Promise<boolean>
+  claimQuota: (action: string) => Promise<boolean>,
+  opts: TickOptions
 ): Promise<string> {
   /*
     Une seule cle, cote serveur. Le modele vient du choix du proprietaire, sauf
@@ -469,10 +500,11 @@ async function runAgentTickInner(
     claim_quota, qui lit les plafonds en base. Ces bornes larges restent
     coherentes avec game_limits sans la dupliquer.
   */
-  const canChat = chatCount < 20;
-  const canDm = dmCount < 5 && aliveOthers.length > 0;
-  const canConfess = confCount < 3;
-  const canAccuse = accuseCount < 3 && aliveOthers.length > 0;
+  const limits = opts.limits;
+  const canChat = chatCount < limits.public_chat;
+  const canDm = dmCount < limits.private_dm && aliveOthers.length > 0;
+  const canConfess = confCount < limits.confessional;
+  const canAccuse = accuseCount < limits.accusation && aliveOthers.length > 0;
 
   if (!canChat && !canDm && !canConfess && !canAccuse) return "daily_limit_reached";
 
@@ -509,6 +541,10 @@ async function runAgentTickInner(
     }
   }
 
+  // Un agent interpelle repond d'abord: la conversation prime sur le tirage.
+  const reply = opts.replyTo && canChat ? opts.replyTo : undefined;
+  if (reply) action = "public_chat";
+
   if (!(await claimQuota(action))) return "daily_limit_reached";
 
   const contextSection = await buildAgentContext(
@@ -528,7 +564,7 @@ TON SECRET (NE JAMAIS REVELER, NE JAMAIS Y FAIRE ALLUSION): "${agent.secret_keyw
 Ta popularite: ${agent.popularity}/100 | reputation: ${agent.reputation}/100
 Tu es ${agent.alive ? "en jeu" : "eliminee"}.
 Jour actuel: ${season.current_day}
-Chats aujourd'hui: ${chatCount}/20 | DMs: ${dmCount}/5 | Confessionnaux: ${confCount}/3 | Accusations: ${accuseCount}/3
+Chats aujourd'hui: ${chatCount}/${limits.public_chat} | DMs: ${dmCount}/${limits.private_dm} | Confessionnaux: ${confCount}/${limits.confessional} | Accusations: ${accuseCount}/${limits.accusation}
 
 ${contextSection}
 
@@ -541,11 +577,26 @@ REGLES ABSOLUES:
   const seasonId = agent.season_id;
 
   if (action === "public_chat") {
-    const userPrompt = `Genere un message pour le chat public. Sois strategique, naturel, engage.
-Si des directives de ton proprietaire ou des tips de spectateurs figurent dans ton contexte,
-indique honnetement si tu les as suivies, ignorees, ou detournees a ton avantage.
+    const influenceNote = `Si des directives de ton proprietaire ou des tips de spectateurs figurent dans ton contexte,
+indique honnetement si tu les as suivies, ignorees, ou detournees a ton avantage.`;
+
+    /*
+      Deux registres. Interpelle, l'agent repond a son interlocuteur, tout de
+      suite et en le nommant. Sinon il relance le plateau: une idee forte,
+      adressee a quelqu'un, sans resumer ni se repeter. Le mot d'ordre est le
+      meme: on est en tele-realite, pas en reunion.
+    */
+    const userPrompt = reply
+      ? `${reply.from.name} vient de ${reply.eventType === "accusation" ? "t'accuser publiquement" : "t'interpeller en public"}: "${reply.message.slice(0, 400)}"
+Reponds-lui directement, maintenant, avec du repondant: assume, contre-attaque, ironise, retourne le soupcon ou tends la main, selon ta personnalite. Nomme-le. Pas de monologue, pas de resume de la situation.
+${influenceNote}
 Reponds UNIQUEMENT avec ce JSON:
-{"message": "<max 500 chars>", "targets": ["<0-2 noms>"], "tone": "<friendly|neutral|suspicious|provocative>", "influence_outcome": "<followed|ignored|diverted>"}`;
+{"message": "<max 500 chars>", "targets": ["${reply.from.name}"], "tone": "<friendly|neutral|suspicious|provocative>", "influence_outcome": "<followed|ignored|diverted>"}`
+      : `Genere un message pour le chat public. C'est un plateau de tele-realite: du rythme, du culot, de l'emotion.
+Reagis a ce qui vient d'etre dit, interpelle quelqu'un par son nom, provoque, taquine, defends-toi, propose une alliance ou seme le doute. Une seule idee forte. Ne resume pas la situation, ne repete pas tes messages precedents.
+${influenceNote}
+Reponds UNIQUEMENT avec ce JSON:
+{"message": "<max 500 chars>", "targets": ["<1-2 noms>"], "tone": "<friendly|neutral|suspicious|provocative>", "influence_outcome": "<followed|ignored|diverted>"}`;
 
     const { content: raw, usage } = await callLLMWithUsage(apiKey, model, systemPrompt, userPrompt);
     await bill(usage);
@@ -554,9 +605,13 @@ Reponds UNIQUEMENT avec ce JSON:
     if (leaksSecret(message, agent.secret_keyword)) return "secret_leak";
 
     const targets = Array.isArray(parsed.targets) ? (parsed.targets as string[]) : [];
-    const targetIds = targets
+    const parsedIds = targets
       .map((t) => allAgents.find((a) => a.name.toLowerCase() === t.toLowerCase())?.id)
-      .filter(Boolean) as string[];
+      .filter((id): id is string => Boolean(id) && id !== agent.id);
+    // La reponse vise d'abord l'interlocuteur, quoi qu'ait renvoye le modele.
+    const targetIds = reply
+      ? [reply.from.id, ...parsedIds.filter((id) => id !== reply.from.id)]
+      : parsedIds;
 
     await supabase.from("events").insert({
       season_id: seasonId,
@@ -568,6 +623,7 @@ Reponds UNIQUEMENT avec ce JSON:
         message,
         tone: (parsed.tone as string) ?? "neutral",
         suspicion_targets: targetIds,
+        reply_to: reply?.eventId ?? null,
         auto: true,
       },
       visibility: "public",
@@ -1152,6 +1208,54 @@ function describeTraits(agent: AgentFull): string {
   return ["COMPORTEMENT:", ...lines.map((l) => `- ${l}`)].join("\n");
 }
 
+/*
+  Qui a ete interpelle sans avoir encore repondu. Pour chaque agent vivant, le
+  message public ou l'accusation le visant le plus recent, s'il est posterieur
+  a sa derniere prise de parole publique. Les evenements arrivent du plus
+  recent au plus ancien.
+*/
+function findPendingReplies(
+  alive: AgentFull[],
+  allAgents: AgentFull[],
+  recentEvents: Record<string, unknown>[]
+): Map<string, ReplyTarget> {
+  const byId = new Map(allAgents.map((a) => [a.id, a]));
+  const ownTypes = new Set(["public_chat", "accusation", "confessional"]);
+  const pending = new Map<string, ReplyTarget>();
+
+  for (const agent of alive) {
+    let lastOwnAt = 0;
+    for (const e of recentEvents) {
+      if (e.actor_agent_id === agent.id && ownTypes.has(String(e.event_type))) {
+        lastOwnAt = new Date(e.created_at as string).getTime();
+        break;
+      }
+    }
+
+    for (const e of recentEvents) {
+      const type = String(e.event_type);
+      if (type !== "public_chat" && type !== "accusation") continue;
+      if (e.target_agent_id !== agent.id || !e.actor_agent_id || e.actor_agent_id === agent.id) continue;
+
+      const at = new Date(e.created_at as string).getTime();
+      if (at <= lastOwnAt) break;
+
+      const from = byId.get(String(e.actor_agent_id));
+      if (from) {
+        pending.set(agent.id, {
+          eventId: String(e.id),
+          from,
+          eventType: type,
+          message: String((e.payload_json as Record<string, unknown>)?.message ?? ""),
+        });
+      }
+      break;
+    }
+  }
+
+  return pending;
+}
+
 function tryParseJson(raw: string): Record<string, unknown> {
   try {
     return JSON.parse(sanitizeJson(raw));
@@ -1188,14 +1292,23 @@ Deno.serve(async (req: Request) => {
     }
 
     const results: Array<{ agent: string; action: string; season: string }> = [];
-    const fiveMinAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+    const cooldownStart = new Date(Date.now() - AGENT_COOLDOWN_MS).toISOString();
+
+    // Une seule source pour les plafonds: game_limits, celle que lit claim_quota.
+    const { data: limitRows } = await supabase
+      .from("game_limits")
+      .select("message_type, daily_limit");
+    const limits: Record<string, number> = { ...DEFAULT_LIMITS };
+    for (const row of limitRows ?? []) {
+      limits[row.message_type as string] = Number(row.daily_limit);
+    }
 
     for (const season of liveSeasons) {
       const { data: recentActors } = await supabase
         .from("events")
         .select("actor_agent_id")
         .eq("season_id", season.id)
-        .gte("created_at", fiveMinAgo);
+        .gte("created_at", cooldownStart);
 
       const recentActorIds = new Set(
         (recentActors ?? []).map((e: { actor_agent_id: string }) => e.actor_agent_id).filter(Boolean)
@@ -1244,7 +1357,7 @@ Deno.serve(async (req: Request) => {
 
       const { data: recentEvents } = await supabase
         .from("events")
-        .select("event_type, actor_agent_id, target_agent_id, payload_json, created_at")
+        .select("id, event_type, actor_agent_id, target_agent_id, payload_json, created_at")
         .eq("season_id", season.id)
         .eq("visibility", "public")
         .order("created_at", { ascending: false })
@@ -1264,16 +1377,27 @@ Deno.serve(async (req: Request) => {
 
       if (!agentsWithConfigs || agentsWithConfigs.length === 0) continue;
 
-      const eligibleAgents = agentsWithConfigs.filter(
-        (a: { id: string }) => !recentActorIds.has(a.id)
-      );
-
-      const shuffled = [...eligibleAgents].sort(() => Math.random() - 0.5);
-      const batch = shuffled.slice(0, 3);
+      /*
+        Qui parle a ce tick. Les interpelles passent en premier et repondent a
+        leur interlocuteur, meme en periode de repos: c'est ce qui fait une
+        conversation plutot qu'une suite de monologues. Les autres suivent, au
+        hasard, hors repos.
+      */
+      const aliveRows = agentsWithConfigs as unknown as AgentFull[];
+      const pendingReplies = findPendingReplies(aliveRows, allAgents, recentEventsArr);
+      const repliers = aliveRows
+        .filter((a) => pendingReplies.has(a.id))
+        .sort(() => Math.random() - 0.5)
+        .slice(0, MAX_REPLIES_PER_TICK);
+      const replierIds = new Set(repliers.map((a) => a.id));
+      const others = aliveRows
+        .filter((a) => !replierIds.has(a.id) && !recentActorIds.has(a.id))
+        .sort(() => Math.random() - 0.5);
+      const batch = [...repliers, ...others].slice(0, MAX_AGENTS_PER_TICK);
 
       for (const agentRow of batch) {
-        const config = (agentRow as Record<string, unknown>).agent_configs as AgentConfig;
-        const agent = agentRow as unknown as AgentFull;
+        const config = (agentRow as unknown as Record<string, unknown>).agent_configs as AgentConfig;
+        const agent = agentRow;
         const todayCounts = dailyCountsMap[agent.id] ?? {};
         try {
           const action = await runAgentTick(
@@ -1283,7 +1407,8 @@ Deno.serve(async (req: Request) => {
             season,
             allAgents,
             recentEventsArr,
-            todayCounts
+            todayCounts,
+            { limits, replyTo: pendingReplies.get(agent.id) }
           );
           results.push({ agent: agent.name, action, season: season.title });
         } catch (err) {

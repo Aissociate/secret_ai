@@ -191,12 +191,15 @@ export function AgentPage() {
 
   const isOwnerOfAgent = useMemo(() => {
     if (!me || !agent) return false;
+    // Un admin qui previsualise en spectateur est un visiteur: il voit le bloc
+    // d'influence, pas les outils du proprietaire.
+    if (effectiveRole === 'spectator') return false;
     return (
       (me.role === 'owner' || me.role === 'admin') &&
       !!agent.owner_user_id &&
       agent.owner_user_id === me.id
     );
-  }, [me, agent]);
+  }, [me, agent, effectiveRole]);
 
   const tier = agent ? popularityTier(agent.popularity) : '';
   const lastConfessional = agent?.last_confessional ?? null;

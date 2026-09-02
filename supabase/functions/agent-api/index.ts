@@ -14,9 +14,9 @@ const corsHeaders = {
 // lu en base via claim_quota (table game_limits), pour que les trois chemins ne
 // puissent plus reserver sur le meme compteur avec des limites differentes.
 const LIMITS = {
-  public_chat: 20,
-  private_dm: 5,
-  confessional: 3,
+  public_chat: 150,
+  private_dm: 40,
+  confessional: 8,
   accusation: 3,
 };
 
