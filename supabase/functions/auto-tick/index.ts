@@ -1,7 +1,6 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "npm:@supabase/supabase-js@2.57.4";
 import { requireCronSecret } from "../_shared/auth.ts";
-// deployed via mcp tool
 import { callLLMWithUsage, platformKey } from "../_shared/llm.ts";
 import { leaksSecret as leaksSecretShared } from "../_shared/secret.ts";
 
