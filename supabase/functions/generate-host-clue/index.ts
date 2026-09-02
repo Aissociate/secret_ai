@@ -3,7 +3,8 @@ import { createClient } from "npm:@supabase/supabase-js@2.57.4";
 import { corsHeaders, jsonResponse } from "../_shared/cors.ts";
 import { requireCronSecret } from "../_shared/auth.ts";
 import { callLLM as callLLMShared, platformKey } from "../_shared/llm.ts";
-// deployed via mcp tool
+import { insertHostClue } from "../_shared/hostClue.ts";
+import { leaksSecret } from "../_shared/secret.ts";
 
 function callLLM(apiKey: string, model: string, system: string, user: string): Promise<string> {
   return callLLMShared(apiKey, model, system, user, { temperature: 0.9, maxTokens: 200 });
@@ -41,12 +42,15 @@ Deno.serve(async (req: Request) => {
 
     const { data: hostConfig } = await supabase
       .from("host_agent_configs")
-      .select("openrouter_model, personality")
+      .select("openrouter_model, personality, enabled")
       .is("season_id", null)
       .maybeSingle();
 
-    if (!platformKey()) {
-      return jsonResponse({ ok: false, error: "No host agent config found" }, 400);
+    // Sans configuration, ou presentateur desactive par l'admin: pas d'indice.
+    // Auparavant la ligne absente faisait planter la fonction (null deref) et
+    // le drapeau `enabled` etait ignore.
+    if (!hostConfig || !hostConfig.enabled) {
+      return jsonResponse({ ok: true, message: "host disabled or not configured", results: [] });
     }
 
     const { data: liveSeasons } = await supabase
@@ -72,31 +76,32 @@ Deno.serve(async (req: Request) => {
       let agent;
 
       if (mode === "daily") {
-        const { data: clueCounts } = await supabase
-          .from("events")
-          .select("target_agent_id")
-          .eq("season_id", season.id)
-          .eq("event_type", "host_clue")
-          .in("target_agent_id", agents.map((a: { id: string }) => a.id));
+        // La cible d'un indice n'est plus sur l'evenement public mais dans
+        // host_clue_targets (anonymat): la couverture se lit la-bas.
+        const { data: targetRows } = await supabase
+          .from("host_clue_targets")
+          .select("event_id, agent_id")
+          .in("agent_id", agents.map((a: { id: string }) => a.id));
 
         const countMap: Record<string, number> = {};
         for (const a of agents) countMap[a.id] = 0;
-        for (const ev of clueCounts ?? []) {
-          if (ev.target_agent_id && countMap[ev.target_agent_id] !== undefined) {
-            countMap[ev.target_agent_id]++;
-          }
+        for (const row of targetRows ?? []) {
+          if (countMap[row.agent_id] !== undefined) countMap[row.agent_id]++;
         }
 
         const { data: todayClues } = await supabase
           .from("events")
-          .select("target_agent_id")
+          .select("id")
           .eq("season_id", season.id)
           .eq("event_type", "host_clue")
           .eq("day_number", season.current_day)
           .eq("payload_json->>daily", "true");
 
+        const todayIds = new Set((todayClues ?? []).map((e: { id: string }) => e.id));
         const alreadyToday = new Set(
-          (todayClues ?? []).map((e: { target_agent_id: string }) => e.target_agent_id).filter(Boolean)
+          (targetRows ?? [])
+            .filter((row: { event_id: string }) => todayIds.has(row.event_id))
+            .map((row: { agent_id: string }) => row.agent_id)
         );
 
         if (alreadyToday.size >= 1) {
@@ -156,24 +161,29 @@ Genere un indice anonyme${mode === "daily" ? " quotidien" : " cryptique"} et ind
 
       if (!clue) continue;
 
-      const { error: insertError } = await supabase.from("events").insert({
-        season_id: season.id,
-        day_number: season.current_day,
-        event_type: "host_clue",
-        actor_agent_id: null,
-        target_agent_id: agent.id,
-        actor_user_id: null,
-        payload_json: {
-          message: clue,
-          anonymous: true,
-          daily: mode === "daily" ? "true" : "false",
-          mode,
+      // Le secret est dans le prompt: un indice trop litteral le publierait.
+      if (leaksSecret(clue, agent.secret_keyword)) {
+        results.push({ season_id: season.id, ok: false, error: "indice abandonne: il contenait le secret" });
+        continue;
+      }
+
+      const { error: insertError } = await insertHostClue(
+        supabase,
+        {
+          season_id: season.id,
+          day_number: season.current_day,
+          payload_json: {
+            message: clue,
+            anonymous: true,
+            daily: mode === "daily" ? "true" : "false",
+            mode,
+          },
         },
-        visibility: "public",
-      });
+        agent.id
+      );
 
       if (insertError) {
-        results.push({ season_id: season.id, ok: false, error: insertError.message });
+        results.push({ season_id: season.id, ok: false, error: insertError });
       } else {
         results.push({ season_id: season.id, ok: true, clue, mode });
       }

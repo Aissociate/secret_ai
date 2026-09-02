@@ -170,10 +170,23 @@ export async function fetchAgent(agentId: string): Promise<AgentDetail | null> {
   };
 }
 
+export type FeedQuery = {
+  day?: number;
+  eventType?: string;
+  limit?: number;
+};
+
+/*
+  Les filtres sont appliques en base: le fil ne rapatrie que les 100 derniers
+  evenements, et filtrer ensuite cote client rendait les premiers jours d'une
+  saison vides, et la page des confessionnaux lacunaire.
+*/
 export async function fetchFeed(
   seasonId: string,
-  day?: number
+  opts: FeedQuery = {}
 ): Promise<{ events: FeedEvent[] }> {
+  const { day, eventType, limit = 100 } = opts;
+
   if (isDemoSeason(seasonId)) {
     // Tri chronologique explicite: le jeu de demonstration est ecrit par
     // sections, et le fil groupe par chapitre revelait ce desordre en
@@ -182,7 +195,8 @@ export async function fetchFeed(
       (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
     );
     if (day) events = events.filter((e) => e.day_number === day);
-    return { events };
+    if (eventType) events = events.filter((e) => e.event_type === eventType);
+    return { events: events.slice(0, limit) };
   }
 
   // events_feed masque le contenu des DM non deverrouilles cote serveur.
@@ -191,10 +205,13 @@ export async function fetchFeed(
     .select(EVENT_COLUMNS)
     .eq('season_id', seasonId)
     .order('created_at', { ascending: false })
-    .limit(100);
+    .limit(limit);
 
   if (day) {
     query = query.eq('day_number', day);
+  }
+  if (eventType) {
+    query = query.eq('event_type', eventType);
   }
 
   const { data, error } = await query;
@@ -332,6 +349,7 @@ type InfluenceResult = {
 const INFLUENCE_ERRORS: Record<string, string> = {
   not_owner: "Vous ne pouvez influencer que votre propre agent.",
   no_influence_left: "Vous avez utilise vos 2 moments du jour.",
+  spectator_limit_reached: "Vous avez deja envoye 3 messages a cet agent aujourd'hui.",
   agent_unavailable: "Cet agent n'est plus en jeu.",
   season_not_live: "La saison n'est pas en cours.",
   empty_message: 'Le message est vide.',

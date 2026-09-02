@@ -130,6 +130,33 @@ async function readFunctionError(res: Response, fallback: string): Promise<strin
   return parts.join(' ');
 }
 
+/*
+  `fetch` ne leve `TypeError: Failed to fetch` que lorsque le navigateur n'a
+  recu aucune reponse exploitable: fonction absente sur le projet vise (le 404
+  de la passerelle sort sans en-tetes CORS), fonction qui echoue au demarrage,
+  origine refusee, ou reseau coupe. Le message brut ne dit rien de tout cela;
+  celui-ci nomme au moins l'hote appele, qui est le premier suspect quand
+  plusieurs projets Supabase coexistent.
+*/
+function describeNetworkFailure(err: unknown, url: string): string {
+  const raw = err instanceof Error ? err.message : String(err);
+  let host = url;
+  try {
+    host = new URL(url).host;
+  } catch {
+    // URL relative ou vide: VITE_SUPABASE_URL manquant au build.
+  }
+  if (/failed to fetch|networkerror|load failed/i.test(raw)) {
+    return (
+      `Aucune reponse de ${host}. ` +
+      "Soit la fonction n'est pas deployee sur ce projet Supabase, soit elle echoue " +
+      "au demarrage, soit l'origine est refusee (ALLOWED_ORIGIN). " +
+      "Verifie l'onglet Reseau et les journaux de la fonction."
+    );
+  }
+  return `Erreur reseau: ${raw}`;
+}
+
 export function AgentSettingsPage() {
   const { configId } = useParams();
   const navigate = useNavigate();
@@ -333,6 +360,7 @@ export function AgentSettingsPage() {
     setConfirmRandom(false);
     setMsg(null);
     setRandomizing(true);
+    const apiUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/generate-secret`;
     try {
       const { data: { session } } = await supabase.auth.getSession();
       if (!session) {
@@ -340,7 +368,6 @@ export function AgentSettingsPage() {
         return;
       }
 
-      const apiUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/generate-secret`;
       const res = await fetch(apiUrl, {
         method: 'POST',
         headers: {
@@ -386,7 +413,7 @@ export function AgentSettingsPage() {
         text: `${id.name || 'Agent'} est tiree au sort. Relis la fiche, genere son avatar, puis enregistre.`,
       });
     } catch (err) {
-      setMsg({ type: 'err', text: `Erreur reseau: ${err}` });
+      setMsg({ type: 'err', text: describeNetworkFailure(err, apiUrl) });
     } finally {
       setRandomizing(false);
     }
@@ -395,6 +422,7 @@ export function AgentSettingsPage() {
   async function handleGenerate() {
     setMsg(null);
     setGenerating(true);
+    const apiUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/generate-secret`;
     try {
       // La cle anon est publique: elle n'authentifiait personne et laissait
       // n'importe qui declencher des generations facturees.
@@ -404,7 +432,6 @@ export function AgentSettingsPage() {
         return;
       }
 
-      const apiUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/generate-secret`;
       const res = await fetch(apiUrl, {
         method: 'POST',
         headers: {
@@ -436,7 +463,7 @@ export function AgentSettingsPage() {
       }));
       setMsg({ type: 'ok', text: 'Secret, indices et presentation generes avec succes.' });
     } catch (err) {
-      setMsg({ type: 'err', text: `Erreur reseau: ${err}` });
+      setMsg({ type: 'err', text: describeNetworkFailure(err, apiUrl) });
     } finally {
       setGenerating(false);
     }
@@ -449,6 +476,7 @@ export function AgentSettingsPage() {
     }
     setMsg(null);
     setGeneratingAvatar(true);
+    const apiUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/generate-avatar`;
     try {
       const { data: { session } } = await supabase.auth.getSession();
       if (!session) {
@@ -456,7 +484,6 @@ export function AgentSettingsPage() {
         return;
       }
 
-      const apiUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/generate-avatar`;
       const res = await fetch(apiUrl, {
         method: 'POST',
         signal: AbortSignal.timeout(60000),
@@ -504,7 +531,7 @@ export function AgentSettingsPage() {
       set('avatar_url', data.url);
       setMsg({ type: 'ok', text: 'Avatar genere avec succes. Pense a sauvegarder.' });
     } catch (err) {
-      setMsg({ type: 'err', text: `Erreur reseau: ${err}` });
+      setMsg({ type: 'err', text: describeNetworkFailure(err, apiUrl) });
     } finally {
       setGeneratingAvatar(false);
     }

@@ -1,10 +1,57 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import { ArrowLeft, BookOpen, Lock, Unlock, Clock, Heart, Brain, AlertTriangle, Sparkles, DollarSign } from 'lucide-react';
-import { fetchAgent, fetchAgents, fetchDiaryEntries, fetchSeason, checkDiaryUnlock, purchaseDiaryUnlock, triggerDiaryGeneration } from '../api/client';
-import type { Agent, AgentDetail, DiaryEntry, Season } from '../api/types';
+import { ArrowLeft, BookOpen, Lock, Unlock, Clock, Heart, Brain, AlertTriangle, Sparkles, DollarSign, Shield, CheckCircle, XCircle, RotateCcw } from 'lucide-react';
+import { fetchAgent, fetchAgents, fetchDiaryEntries, fetchSeason, checkDiaryUnlock, purchaseDiaryUnlock, triggerDiaryGeneration, fetchInfluenceHistory } from '../api/client';
+import type { Agent, AgentDetail, DiaryEntry, InfluenceRecord, Season } from '../api/types';
 import { SkeletonBlock } from '../components/Skeleton';
+import { OwnerPanel } from '../components/OwnerPanel';
 import { useAuth } from '../context/AuthContext';
+
+const OUTCOME_LABELS: Record<string, { label: string; color: string; Icon: typeof CheckCircle }> = {
+  followed: { label: 'Suivie', color: 'text-emerald-400', Icon: CheckCircle },
+  ignored: { label: 'Ignoree', color: 'text-red-400', Icon: XCircle },
+  diverted: { label: 'Detournee', color: 'text-amber-400', Icon: RotateCcw },
+  pending: { label: 'En attente', color: 'text-white/30', Icon: RotateCcw },
+};
+
+/*
+  Consignes du proprietaire, en lecture seule, pour ceux qui ont deverrouille
+  le journal. Le proprietaire, lui, a le panneau complet (envoi + historique).
+*/
+function DirectivesReadOnly({ directives }: { directives: InfluenceRecord[] }) {
+  return (
+    <section className="border border-teal-400/10 rounded-2xl p-5 bg-gradient-to-br from-teal-500/[0.04] to-transparent">
+      <div className="flex items-center gap-2 mb-3">
+        <Shield className="w-4 h-4 text-teal-400" />
+        <h3 className="text-sm font-bold text-teal-300">Consignes du proprietaire</h3>
+      </div>
+      {directives.length === 0 ? (
+        <p className="text-xs text-white/35">Aucune consigne pour l'instant.</p>
+      ) : (
+        <ul className="space-y-2">
+          {directives.map((d) => {
+            const o = OUTCOME_LABELS[d.outcome] ?? OUTCOME_LABELS.pending;
+            return (
+              <li key={d.id} className="rounded-xl bg-white/[0.03] border border-white/[0.06] px-3 py-2.5">
+                <div className="flex items-center gap-2 mb-1">
+                  <span className="text-[10px] font-bold text-white/30">J{d.day_number}</span>
+                  <span className={`flex items-center gap-1 text-[10px] font-bold ${o.color}`}>
+                    <o.Icon className="w-3 h-3" />
+                    {o.label}
+                  </span>
+                </div>
+                <p className="text-xs text-white/70 leading-relaxed">{d.message}</p>
+                {d.agent_response && (
+                  <p className="text-[11px] text-white/40 italic mt-1 leading-relaxed">{d.agent_response}</p>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </section>
+  );
+}
 
 const MOOD_CONFIG: Record<string, { color: string; bg: string; icon: typeof Heart }> = {
   nerveuse: { color: 'text-amber-400', bg: 'bg-amber-500/10', icon: AlertTriangle },
@@ -189,6 +236,7 @@ export function DiaryPage() {
   const [season, setSeason] = useState<Season | null>(null);
   const [entries, setEntries] = useState<DiaryEntry[]>([]);
   const [unlocked, setUnlocked] = useState(false);
+  const [directives, setDirectives] = useState<InfluenceRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [unlocking, setUnlocking] = useState(false);
   const [generating, setGenerating] = useState(false);
@@ -201,6 +249,8 @@ export function DiaryPage() {
   */
   const isAdmin = effectiveRole === 'admin';
   const isSeasonEnded = season?.status === 'ended';
+  // Le proprietaire lit le journal et les consignes de son agent sans payer.
+  const isOwner = !!profile?.id && !!agent?.owner_user_id && agent.owner_user_id === profile.id;
 
   useEffect(() => {
     setLoading(true);
@@ -222,7 +272,20 @@ export function DiaryPage() {
     }
   }, [profile?.id, aid, sid, isSeasonEnded]);
 
-  const canView = unlocked || isAdmin || isSeasonEnded;
+  const canView = unlocked || isAdmin || isSeasonEnded || isOwner;
+
+  useEffect(() => {
+    if (!canView || isOwner) return;
+    let cancelled = false;
+    fetchInfluenceHistory(aid, sid)
+      .then((rows) => {
+        if (!cancelled) setDirectives(rows.filter((r) => r.influence_type === 'owner_influence'));
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [canView, isOwner, aid, sid]);
 
   const agentObj = useMemo(() => {
     return allAgents.find((a) => a.id === aid) ?? (agent ? { ...agent } : null);
@@ -377,6 +440,20 @@ export function DiaryPage() {
 
       {canView && (
         <>
+          {isOwner && profile ? (
+            <OwnerPanel
+              agentId={aid}
+              seasonId={sid}
+              dayNumber={season?.current_day ?? 1}
+              userId={profile.id}
+              username={profile.username}
+              ownerRemaining={agent?.owner_influences_remaining ?? 2}
+              allAgents={allAgents}
+            />
+          ) : (
+            <DirectivesReadOnly directives={directives} />
+          )}
+
           <div className="flex items-center gap-2 overflow-x-auto pb-1 scrollbar-thin">
             <button
               onClick={() => setDayFilter(null)}

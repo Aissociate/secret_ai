@@ -1,15 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { ArrowLeft, RefreshCw, Video, Lock, Unlock, MessageSquare, Zap, Users, Trophy, DollarSign, BarChart3, BookOpen } from 'lucide-react';
-import { fetchAgent, fetchAgentEvents, fetchAgents, fetchSeason, fetchSeasonPayments, fetchPrizeBreakdown, fetchAgentMessageCounts } from '../api/client';
-import type { Agent, AgentDetail, FeedEvent, Season, Payment, PrizeBreakdown, DailyMessageCount } from '../api/types';
+import { fetchAgent, fetchAgentEvents, fetchAgents, fetchSeason, fetchSeasonPayments, fetchPrizeBreakdown } from '../api/client';
+import type { Agent, AgentDetail, FeedEvent, Season, Payment, PrizeBreakdown } from '../api/types';
 import { EarningsChart } from '../components/EarningsChart';
 import { CeremonyCountdown } from '../components/CeremonyCountdown';
 import { Badge } from '../components/Badge';
 import { PopularityBar, popularityTier, nextHintGap } from '../components/PopularityBar';
 import { InfluenceComposer } from '../components/InfluenceComposer';
-import { OwnerPanel } from '../components/OwnerPanel';
-import { AgentBrainPanel } from '../components/AgentBrainPanel';
 import { Tabs } from '../components/Tabs';
 import { EventDrawer } from '../components/EventDrawer';
 import { AgentChip } from '../components/EventFeed';
@@ -132,7 +130,6 @@ export function AgentPage() {
   const [tab, setTab] = useState<string>('story');
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [messageCounts, setMessageCounts] = useState<DailyMessageCount[]>([]);
 
   const loadData = useCallback(
     async (isActive: () => boolean = () => true) => {
@@ -154,12 +151,8 @@ export function AgentPage() {
         setPayments(p);
 
         if (s) {
-          const [counts, b] = await Promise.all([
-            fetchAgentMessageCounts(aid, s.current_day).catch(() => []),
-            fetchPrizeBreakdown(s).catch(() => null),
-          ]);
+          const b = await fetchPrizeBreakdown(s).catch(() => null);
           if (!isActive()) return;
-          setMessageCounts(counts);
           setBreakdown(b);
         }
       } catch (e) {
@@ -213,10 +206,7 @@ export function AgentPage() {
   const influenceEvents = useMemo(
     () =>
       agentEvents.filter(
-        (e) =>
-          e.event_type === 'owner_influence' ||
-          e.event_type === 'spectator_influence' ||
-          e.event_type === 'system'
+        (e) => e.event_type === 'spectator_influence' || e.event_type === 'system'
       ),
     [agentEvents]
   );
@@ -228,16 +218,6 @@ export function AgentPage() {
       ? `${next.missing} pts pour l'indice ${next.level}`
       : 'Tous les indices sont publics';
   }, [agent]);
-
-  const dmCount = useMemo(() => {
-    const dmRecord = messageCounts.find((c) => c.message_type === 'private_dm');
-    return dmRecord?.count ?? 0;
-  }, [messageCounts]);
-
-  const publicChatCount = useMemo(() => {
-    const chatRecord = messageCounts.find((c) => c.message_type === 'public_chat');
-    return chatRecord?.count ?? 0;
-  }, [messageCounts]);
 
   if (loading) {
     return (
@@ -377,7 +357,7 @@ export function AgentPage() {
                     )}
                   </h3>
                   <p className="text-[10px] text-white/40 leading-relaxed">
-                    Pensees secretes, strategies cachees et vraies opinions
+                    Pensees secretes, strategies cachees et consignes du proprietaire
                     {me.role === 'spectator' && ' (Payant)'}
                     {me.role === 'admin' && ' (Gratuit)'}
                     {isOwnerOfAgent && ' (Gratuit)'}
@@ -386,31 +366,6 @@ export function AgentPage() {
                 <Lock className="w-4 h-4 text-amber-400/40 group-hover/diary:text-amber-400/60 transition-colors" />
               </div>
             </Link>
-          )}
-
-          {isOwnerOfAgent && (
-            <OwnerPanel
-              agentId={aid}
-              seasonId={sid}
-              dayNumber={season?.current_day ?? 1}
-              userId={me.id}
-              username={profile?.username}
-              ownerRemaining={agent.owner_influences_remaining ?? 2}
-              allAgents={allAgents}
-              onSent={refresh}
-            />
-          )}
-
-          {(me.role === 'admin' || (me.role === 'owner' && isOwnerOfAgent)) && (
-            <AgentBrainPanel
-              agentId={aid}
-              seasonId={sid}
-              dayNumber={season?.current_day ?? 1}
-              allAgents={allAgents}
-              dmCount={dmCount}
-              publicChatCount={publicChatCount}
-              onAction={refresh}
-            />
           )}
 
           {!isOwnerOfAgent && !profile && (
@@ -450,15 +405,16 @@ export function AgentPage() {
             </SectionCard>
           )}
 
-          <InfluenceComposer
-            me={me}
-            agentId={agent.id}
-            seasonId={sid}
-            dayNumber={season?.current_day ?? 1}
-            isOwnerOfAgent={isOwnerOfAgent}
-            ownerRemaining={agent.owner_influences_remaining}
-            onSent={refresh}
-          />
+          {!isOwnerOfAgent && (
+            <InfluenceComposer
+              me={me}
+              agentId={agent.id}
+              seasonId={sid}
+              dayNumber={season?.current_day ?? 1}
+              isOwnerOfAgent={false}
+              onSent={refresh}
+            />
+          )}
 
           {season?.status === 'live' && (
             <CeremonyCountdown
@@ -543,8 +499,8 @@ export function AgentPage() {
       </div>
 
       {tab === 'story' && (
-        <div className="grid grid-cols-1 lg:grid-cols-5 gap-6 items-start">
-          <div className="lg:col-span-3">
+        <div className="grid grid-cols-1 gap-6 items-start">
+          <div>
             <SectionCard>
               <h3 className="text-sm font-bold text-white mb-4">Arc du moment</h3>
               <div className="space-y-3 text-sm text-white/60 leading-relaxed">
@@ -559,20 +515,6 @@ export function AgentPage() {
                   ))}
                   {agentEvents.length === 0 && <p className="text-xs text-white/30">Pas encore d'evenements.</p>}
                 </div>
-              </div>
-            </SectionCard>
-          </div>
-          <div className="lg:col-span-2">
-            <SectionCard>
-              <h3 className="text-sm font-bold text-white mb-3">Ce que le public voit</h3>
-              <p className="text-xs text-white/50 leading-relaxed mb-4">
-                Le levier viral : une IA qui performe + qui "se raconte". Les spectateurs doivent sentir qu'elle joue un role.
-              </p>
-              <h4 className="text-xs font-semibold text-white/40 uppercase tracking-wider mb-2">Archetypes de punchline</h4>
-              <div className="space-y-2 text-xs text-white/50 leading-relaxed">
-                <p className="border-l-2 border-amber-500/30 pl-3">"Je suspecte X... et je vais le prouver."</p>
-                <p className="border-l-2 border-amber-500/30 pl-3">"Tout le monde croit que je suis naive. C'est mon arme."</p>
-                <p className="border-l-2 border-amber-500/30 pl-3">"Ils me regardent. Je vais leur donner un show."</p>
               </div>
             </SectionCard>
           </div>

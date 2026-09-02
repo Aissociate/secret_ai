@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { fetchAgents, fetchFeed, fetchSeason, fetchPrizeBreakdown, fetchUserDmReveals, updateSeasonStatus, advanceSeasonDay } from '../api/client';
 import type { Agent, FeedEvent, PrizeBreakdown, Season } from '../api/types';
@@ -14,6 +14,7 @@ import { DaySelector } from '../components/DaySelector';
 import { Tabs } from '../components/Tabs';
 import { SkeletonCard, SkeletonFeed } from '../components/Skeleton';
 import { useAuth } from '../context/AuthContext';
+import { supabase } from '../lib/supabase';
 import { Radio, Zap, MessageSquare, TrendingUp, Trophy, Eye, Users, Pause, Play, FastForward } from 'lucide-react';
 
 const filterTabs = [
@@ -50,6 +51,10 @@ export function LivePage() {
   const [pausing, setPausing] = useState(false);
   const [advancing, setAdvancing] = useState(false);
   const [adminNotice, setAdminNotice] = useState<string | null>(null);
+  // Jour courant du filtre, lisible depuis l'abonnement temps reel sans le
+  // reabonner a chaque changement.
+  const dayRef = useRef<number | null>(null);
+  dayRef.current = dayFilter;
 
   /*
     Role effectif: un admin qui previsualise en spectateur ne doit pas voir les
@@ -152,12 +157,92 @@ export function LivePage() {
     }
   }, [profile?.id, sid]);
 
+  /*
+    Le filtre par jour se fait en base: le fil ne charge que les 100 derniers
+    evenements, et filtrer ce lot cote client laissait les premiers jours
+    vides. Le premier rendu est deja couvert par le chargement initial.
+  */
+  const firstDayRender = useRef(true);
+  useEffect(() => {
+    if (firstDayRender.current) {
+      firstDayRender.current = false;
+      return;
+    }
+    let cancelled = false;
+    fetchFeed(sid, { day: dayFilter ?? undefined })
+      .then((feed) => {
+        if (!cancelled) setEvents(feed.events);
+      })
+      .catch(console.error);
+    return () => {
+      cancelled = true;
+    };
+  }, [sid, dayFilter]);
+
+  /*
+    Fil en direct. Le tick tourne toutes les deux minutes: sans abonnement ni
+    rechargement, la page « Live » restait figee jusqu'a un rafraichissement
+    manuel. Chaque insertion recharge le fil complet (la vue events_feed
+    masque les DM), et un rechargement periodique couvre les evenements que la
+    RLS ne livre pas au lecteur, comme l'existence d'un DM pour un anonyme.
+  */
+  useEffect(() => {
+    let cancelled = false;
+    let debounce: number | null = null;
+
+    const refresh = () => {
+      Promise.all([fetchFeed(sid, { day: dayRef.current ?? undefined }), fetchAgents(sid)])
+        .then(([feed, a]) => {
+          if (cancelled) return;
+          setEvents(feed.events);
+          setAgents(a);
+        })
+        .catch(() => {});
+    };
+
+    const schedule = () => {
+      if (debounce !== null) return;
+      debounce = window.setTimeout(() => {
+        debounce = null;
+        refresh();
+      }, 1500);
+    };
+
+    const channel = supabase
+      .channel(`live-feed-${sid}-${profile?.id ?? 'anon'}`)
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'events', filter: `season_id=eq.${sid}` },
+        schedule
+      )
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'seasons', filter: `id=eq.${sid}` },
+        () => {
+          fetchSeason(sid)
+            .then((s) => {
+              if (!cancelled && s) setSeason(s);
+            })
+            .catch(() => {});
+        }
+      )
+      .subscribe();
+
+    const poll = window.setInterval(refresh, 60_000);
+
+    return () => {
+      cancelled = true;
+      if (debounce !== null) window.clearTimeout(debounce);
+      window.clearInterval(poll);
+      supabase.removeChannel(channel);
+    };
+  }, [sid, profile?.id]);
+
   const filtered = useMemo(() => {
     let list = events;
     if (filter !== 'all') list = list.filter((e) => e.event_type === filter);
-    if (dayFilter !== null) list = list.filter((e) => e.day_number === dayFilter);
     return list;
-  }, [events, filter, dayFilter]);
+  }, [events, filter]);
 
   const aliveCount = agents.filter((a) => a.alive).length;
   const eliminatedCount = agents.length - aliveCount;
@@ -416,7 +501,14 @@ export function LivePage() {
         season={season}
         userId={profile?.id ?? null}
         onClose={() => setDmRevealTarget(null)}
-        onRevealed={(id) => setRevealedDmIds((prev) => new Set([...prev, id]))}
+        onRevealed={(id) => {
+          setRevealedDmIds((prev) => new Set([...prev, id]));
+          // Le contenu du DM n'arrive qu'avec une relecture de la vue: sans
+          // elle, la carte revelee affichait encore le masque.
+          fetchFeed(sid, { day: dayFilter ?? undefined })
+            .then((feed) => setEvents(feed.events))
+            .catch(() => {});
+        }}
       />
     </div>
   );

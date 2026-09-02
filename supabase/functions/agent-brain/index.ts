@@ -1,6 +1,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "npm:@supabase/supabase-js@2.57.4";
 import { callLLM as callLLMShared, sanitizeUserDirective, platformKey } from "../_shared/llm.ts";
+import { describeRules, describeAccusations } from "../_shared/gameContext.ts";
 import { leaksSecret } from "../_shared/secret.ts";
 
 const corsHeaders = {
@@ -34,6 +35,9 @@ interface AgentContext {
   publicHints: Array<Record<string, unknown>>;
   suspicionSummary: string;
   prizePoolInfo: string;
+  accusationsSection: string;
+  accusationsAgainstMe: string;
+  rulesSection: string;
 }
 
 async function gatherContext(
@@ -76,9 +80,20 @@ async function gatherContext(
       "accusation",
       "elimination",
       "host_commentary",
+      "host_clue",
+      "hint_reveal",
     ])
     .order("created_at", { ascending: false })
     .limit(25);
+
+  // Historique complet des accusations: chaque devinette ratee exclut un mot.
+  const { data: accusationsRaw } = await supabase
+    .from("events")
+    .select("day_number, actor_agent_id, target_agent_id, payload_json")
+    .eq("season_id", seasonId)
+    .eq("event_type", "accusation")
+    .order("created_at", { ascending: false })
+    .limit(20);
 
   const { data: agentDms } = await supabase
     .from("events")
@@ -185,6 +200,18 @@ async function gatherContext(
 
 IMPLICATION: Le prize pool est l'enjeu final. Plus il est gros, plus les agents seront motives et strategiques. Garde cela en tete dans tes decisions.`;
 
+  const { history: accusationsSection, againstMe: accusationsAgainstMe } = describeAccusations(
+    (accusationsRaw ?? []) as Parameters<typeof describeAccusations>[0],
+    nameMap as Map<string, string>,
+    agentId
+  );
+
+  const rulesSection = describeRules(
+    (season ?? {}) as Record<string, unknown>,
+    (allAgents ?? []).filter((a: Record<string, unknown>) => a.alive === true).length,
+    { reputation: Number(agent?.reputation ?? 0) }
+  );
+
   return {
     agent: agent ?? {},
     config: config ?? {},
@@ -201,6 +228,9 @@ IMPLICATION: Le prize pool est l'enjeu final. Plus il est gros, plus les agents 
         ? suspicionLines.join("\n")
         : "Tu n'as pas encore de suspicions fortes.",
     prizePoolInfo,
+    accusationsSection,
+    accusationsAgainstMe,
+    rulesSection,
   };
 }
 
@@ -285,8 +315,16 @@ Jour actuel: ${(ctx.season as Record<string, unknown>).current_day}
 
 Agents dans la maison: ${allAgentList}
 
+${ctx.rulesSection}
+
 INDICES PUBLICS DEJA REVELES:
 ${hintsSection || "(Aucun indice revele)"}
+
+ACCUSATIONS DE LA SAISON (mot devine et resultat):
+${ctx.accusationsSection}
+
+ACCUSATIONS CONTRE TOI:
+${ctx.accusationsAgainstMe}
 
 MESSAGES PUBLICS RECENTS:
 ${recentMsgs || "(Aucun message recent)"}
@@ -846,7 +884,7 @@ Deno.serve(async (req: Request) => {
       return jsonResponse({ error: "Agent has been eliminated" }, 403);
     }
 
-    if (!ctx.platformKey()) {
+    if (!platformKey()) {
       return jsonResponse(
         { error: "Agent has no API key configured" },
         400

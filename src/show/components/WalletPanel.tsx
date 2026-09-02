@@ -37,7 +37,6 @@ export function WalletPanel({ compact = false }: { compact?: boolean }) {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [showDeposit, setShowDeposit] = useState(false);
-  const [depositAmount, setDepositAmount] = useState('50');
   const [depositing, setDepositing] = useState(false);
   const [depositMsg, setDepositMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
 
@@ -63,23 +62,37 @@ export function WalletPanel({ compact = false }: { compact?: boolean }) {
     };
   }, [load]);
 
+  /*
+    La seule recharge existante est demo_topup: montant et plafond fixes par
+    l'admin dans game_settings, sans paiement derriere. Le panneau appelait
+    une fonction deposit_funds qui n'a jamais existe.
+  */
   async function handleDeposit() {
-    const amount = parseFloat(depositAmount);
-    if (!amount || amount <= 0) {
-      setDepositMsg({ type: 'err', text: 'Montant invalide' });
-      return;
-    }
     setDepositing(true);
     setDepositMsg(null);
     try {
-      const { data, error: rpcError } = await supabase.rpc('deposit_funds', { p_amount: amount });
+      const { data, error: rpcError } = await supabase.rpc('demo_topup');
       if (rpcError) throw rpcError;
-      if (data && !(data as { ok: boolean }).ok) {
-        throw new Error((data as { error?: string }).error ?? 'Echec de la recharge');
+      const res = (data ?? {}) as {
+        ok?: boolean;
+        error?: string;
+        credited?: number;
+        already?: number;
+        cap?: number;
+      };
+      if (!res.ok) {
+        if (res.error === 'cap_reached') {
+          throw new Error(
+            `Plafond de demonstration atteint (${Number(res.already ?? 0).toFixed(0)} / ${Number(res.cap ?? 0).toFixed(0)} USDC).`
+          );
+        }
+        if (res.error === 'topup_disabled') {
+          throw new Error('La recharge de demonstration est desactivee.');
+        }
+        throw new Error(res.error ?? 'Echec de la recharge');
       }
-      setDepositMsg({ type: 'ok', text: `Solde credite de ${amount} USDC` });
-      let cancelled = false;
-      load(() => !cancelled);
+      setDepositMsg({ type: 'ok', text: `Solde credite de ${Number(res.credited ?? 0).toFixed(0)} USDC` });
+      load(() => true);
     } catch (e) {
       setDepositMsg({ type: 'err', text: errorMessage(e, 'Recharge impossible') });
     } finally {
@@ -140,38 +153,18 @@ export function WalletPanel({ compact = false }: { compact?: boolean }) {
 
       {showDeposit && (
         <div className="px-5 py-4 border-b border-white/[0.06] bg-white/[0.02] space-y-3">
-          <div className="flex items-center gap-2">
-            <input
-              type="number"
-              min="1"
-              max="10000"
-              step="1"
-              value={depositAmount}
-              onChange={(e) => setDepositAmount(e.target.value)}
-              className="w-28 px-3 py-2 rounded-xl bg-white/[0.04] border border-white/8 text-white text-sm font-bold tabular-nums focus:outline-none focus:border-teal-400/40 transition-colors"
-              disabled={depositing}
-            />
-            <span className="text-xs text-white/40 font-medium">USDC</span>
-            <button
-              onClick={handleDeposit}
-              disabled={depositing}
-              className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-teal-500/20 border border-teal-400/30 text-teal-300 text-sm font-bold hover:bg-teal-500/30 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
-            >
-              {depositing ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Plus className="w-3.5 h-3.5" />}
-              {depositing ? '...' : 'Créditer'}
-            </button>
-          </div>
-          <div className="flex gap-1.5">
-            {[10, 50, 100, 500].map((amt) => (
-              <button
-                key={amt}
-                onClick={() => setDepositAmount(String(amt))}
-                className="px-2.5 py-1 rounded-lg bg-white/[0.04] border border-white/8 text-white/50 text-xs font-medium hover:bg-white/[0.08] hover:text-white/80 transition-all"
-              >
-                {amt}
-              </button>
-            ))}
-          </div>
+          <p className="text-xs text-white/45 leading-relaxed">
+            Recharge de demonstration : un montant fixe, defini par
+            l&apos;administration, dans la limite d&apos;un plafond par compte.
+          </p>
+          <button
+            onClick={handleDeposit}
+            disabled={depositing}
+            className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-teal-500/20 border border-teal-400/30 text-teal-300 text-sm font-bold hover:bg-teal-500/30 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            {depositing ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Plus className="w-3.5 h-3.5" />}
+            {depositing ? '...' : 'Crediter la recharge'}
+          </button>
           {depositMsg && (
             <p className={`text-xs ${depositMsg.type === 'ok' ? 'text-emerald-400' : 'text-red-400'}`}>
               {depositMsg.text}

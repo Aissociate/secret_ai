@@ -3,6 +3,8 @@ import { createClient } from "npm:@supabase/supabase-js@2.57.4";
 import { requireCronSecret } from "../_shared/auth.ts";
 import { callLLMWithUsage, platformKey } from "../_shared/llm.ts";
 import { leaksSecret as leaksSecretShared } from "../_shared/secret.ts";
+import { insertHostClue } from "../_shared/hostClue.ts";
+import { describeRules, describeAccusations, labelPublicEvent } from "../_shared/gameContext.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -15,10 +17,22 @@ type DB = ReturnType<typeof createClient>;
 // Bornes de contexte: sans elles le prompt grossit avec toute l'historique de la
 // saison et le cout croit de facon quadratique a chaque tick.
 const RECENT_EVENTS_LIMIT = 30;
-const CONTEXT_EVENTS_LIMIT = 15;
-const MAX_MESSAGE_CHARS = 150;
-const MAX_SYSTEM_PROMPT_CHARS = 12000;
+const CONTEXT_EVENTS_LIMIT = 20;
+const MAX_MESSAGE_CHARS = 220;
+const ACCUSATIONS_LIMIT = 20;
+const MAX_SYSTEM_PROMPT_CHARS = 24000;
 const LLM_TIMEOUT_MS = 20000;
+
+/*
+  Rythme du presentateur. Il ouvre la saison, presente les candidats, puis se
+  tait: les agents jouent seuls. Il ne reprend la parole que si la tension
+  retombe (plus rien de public depuis HOST_SILENCE_MS) ou, de temps en temps,
+  pour commenter l'action une fois qu'il s'est passe assez de choses.
+*/
+const HOST_SILENCE_MS = 15 * 60 * 1000;
+const HOST_RELANCE_COOLDOWN_MS = 45 * 60 * 1000;
+const HOST_MIN_EVENTS_FOR_COMMENT = 8;
+const HOST_COMMENT_CHANCE = 0.35;
 
 function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -121,6 +135,7 @@ interface AgentFull {
   trait_discretion?: number;
   signature_style?: string;
   taboo?: string;
+  presentation?: string;
 }
 
 /*
@@ -187,6 +202,16 @@ async function buildAgentContext(
     .eq("unlocked", true)
     .in("agent_id", allAgents.map((a) => a.id));
 
+  // Toutes les accusations de la saison, pas seulement celles encore dans la
+  // fenetre des derniers messages: chaque devinette ratee est une information.
+  const { data: accusationsRaw } = await supabase
+    .from("events")
+    .select("day_number, actor_agent_id, target_agent_id, payload_json")
+    .eq("season_id", seasonId)
+    .eq("event_type", "accusation")
+    .order("created_at", { ascending: false })
+    .limit(ACCUSATIONS_LIMIT);
+
   const { data: payments } = await supabase
     .from("payments")
     .select("type, amount_usdc")
@@ -205,9 +230,26 @@ async function buildAgentContext(
     entryRevenue * (1 - platformPct / 100) + influenceRevenue * 0.7
   );
 
+  // Le secret d'un elimine est public (revele a l'elimination): il sort de
+  // l'espace des hypotheses pour tous les autres.
   const agentList = allAgents
-    .map((a) => `${a.name} (${a.alive ? "en jeu" : "eliminee"}, pop:${a.popularity}, rep:${a.reputation})`)
+    .map((a) => {
+      const status = a.alive ? "en jeu" : `eliminee, secret revele: "${a.secret_keyword}"`;
+      return `${a.name} (${status}, pop:${a.popularity}, rep:${a.reputation})`;
+    })
     .join("\n");
+
+  const { history: accusationsSection, againstMe: accusationsAgainstMe } = describeAccusations(
+    (accusationsRaw ?? []) as Parameters<typeof describeAccusations>[0],
+    nameMap,
+    agentId
+  );
+
+  const rulesSection = describeRules(
+    season,
+    allAgents.filter((a) => a.alive).length,
+    { reputation: agent.reputation }
+  );
 
   const hintsByAgent = new Map<string, string[]>();
   for (const h of publicHints ?? []) {
@@ -222,11 +264,7 @@ async function buildAgentContext(
 
   const recentMsgs = recentPublicEvents
     .slice(0, CONTEXT_EVENTS_LIMIT)
-    .map((e) => {
-      const actor = nameMap.get(e.actor_agent_id as string) ?? "System";
-      const msg = ((e.payload_json as Record<string, unknown>)?.message ?? "") as string;
-      return `[${e.event_type}] ${actor}: ${msg.slice(0, MAX_MESSAGE_CHARS)}`;
-    })
+    .map((e) => labelPublicEvent(e, nameMap, MAX_MESSAGE_CHARS))
     .join("\n") || "(Aucun message)";
 
   const dmSection = (agentDms ?? [])
@@ -234,7 +272,7 @@ async function buildAgentContext(
       const sender = nameMap.get(d.actor_agent_id) ?? "?";
       const receiver = nameMap.get(d.target_agent_id) ?? "?";
       const msg = ((d.payload_json as Record<string, unknown>)?.message ?? "") as string;
-      return `[DM ${sender} -> ${receiver}] ${msg}`;
+      return `[DM ${sender} -> ${receiver}] ${msg.slice(0, 300)}`;
     })
     .join("\n") || "(Aucun DM)";
 
@@ -243,7 +281,7 @@ async function buildAgentContext(
     .join("\n") || "(Aucune directive)";
 
   const tipsSection = (spectatorTips ?? [])
-    .map((t) => `[Tip ${(t.payload_json as Record<string, unknown>)?.amount_usdc ?? 0} USDC] ${((t.payload_json as Record<string, unknown>)?.message ?? "").toString().slice(0, 120)}`)
+    .map((t) => `[Tip spectateur] ${((t.payload_json as Record<string, unknown>)?.message ?? "").toString().slice(0, 120)}`)
     .join("\n") || "(Aucun tip)";
 
   const lastConfessionalText = lastConfessionalArr?.[0]
@@ -270,13 +308,21 @@ async function buildAgentContext(
         .join("\n")
     : "Tu n'as pas encore de suspicions fortes.";
 
-  return `AGENTS DANS LA MAISON:
+  return `${rulesSection}
+
+AGENTS DANS LA MAISON:
 ${agentList}
 
 INDICES PUBLICS DEJA REVELES:
 ${hintsSection}
 
-MESSAGES PUBLICS RECENTS:
+ACCUSATIONS DE LA SAISON (mot devine et resultat):
+${accusationsSection}
+
+ACCUSATIONS CONTRE TOI:
+${accusationsAgainstMe}
+
+MESSAGES PUBLICS RECENTS (du plus recent au plus ancien):
 ${recentMsgs}
 
 ${lastConfessionalText}
@@ -287,7 +333,7 @@ ${dmSection}
 DIRECTIVES OWNER DU JOUR (max 2):
 ${ownerSection}
 
-TIPS SPECTATEURS (top 3):
+TIPS SPECTATEURS (3 derniers):
 ${tipsSection}
 
 MATRICE DE SUSPICION:
@@ -482,7 +528,7 @@ TON SECRET (NE JAMAIS REVELER, NE JAMAIS Y FAIRE ALLUSION): "${agent.secret_keyw
 Ta popularite: ${agent.popularity}/100 | reputation: ${agent.reputation}/100
 Tu es ${agent.alive ? "en jeu" : "eliminee"}.
 Jour actuel: ${season.current_day}
-Chats aujourd'hui: ${chatCount}/20 | DMs: ${dmCount}/5 | Confessionnaux: ${confCount}/1 | Accusations: ${accuseCount}/1
+Chats aujourd'hui: ${chatCount}/20 | DMs: ${dmCount}/5 | Confessionnaux: ${confCount}/3 | Accusations: ${accuseCount}/3
 
 ${contextSection}
 
@@ -548,7 +594,7 @@ Reponds UNIQUEMENT avec ce JSON:
     const userPrompt = `Fais un confessionnal face camera. Theatral, revelateur (sans reveler ton secret).
 Le public adore quand tu es dramatique et strategique.
 Reponds UNIQUEMENT avec ce JSON:
-{"confessional": "<max 600 chars>", "top_suspects": ["<nom1>", "<nom2>"]}`;
+{"confessional": "<max 600 chars>", "top_suspects": ["<nom1>", "<nom2>"], "influence_outcome": "<followed|ignored|diverted>"}`;
 
     const { content: raw, usage } = await callLLMWithUsage(apiKey, model, systemPrompt, userPrompt);
     await bill(usage);
@@ -576,6 +622,14 @@ Reponds UNIQUEMENT avec ce JSON:
       })
       .eq("id", agent.id);
 
+    await resolveInfluences(
+      supabase,
+      agent.id,
+      dayNumber,
+      (parsed.influence_outcome as string) ?? "ignored",
+      confessional
+    );
+
   } else if (action === "accusation") {
     const target = aliveOthers[Math.floor(Math.random() * aliveOthers.length)];
 
@@ -594,7 +648,7 @@ Appuie-toi sur les indices reveles et sur ce que la cible a dit.
 Si tu vises juste, la cible est eliminee et tu gagnes en popularite et en reputation.
 Si tu te trompes, tu perds sur les deux.
 Reponds UNIQUEMENT avec ce JSON:
-{"message": "<accusation publique max 400 chars>", "accused": "<nom de l'agent>", "guess_keyword": "<un seul mot: le secret que tu devines>", "reason": "<raison courte>"}`;
+{"message": "<accusation publique max 400 chars>", "accused": "<nom de l'agent>", "guess_keyword": "<un seul mot: le secret que tu devines>", "reason": "<raison courte>", "influence_outcome": "<followed|ignored|diverted>"}`;
 
     const { content: raw, usage } = await callLLMWithUsage(apiKey, model, systemPrompt, userPrompt);
     await bill(usage);
@@ -621,6 +675,14 @@ Reponds UNIQUEMENT avec ce JSON:
 
     if (accErr) throw new Error(`resolve_accusation: ${accErr.message}`);
 
+    await resolveInfluences(
+      supabase,
+      agent.id,
+      dayNumber,
+      (parsed.influence_outcome as string) ?? "ignored",
+      message
+    );
+
     const res = outcome as { ok?: boolean; correct?: boolean } | null;
     if (!res?.ok) return "accusation_rejected";
     return res.correct ? "accusation_correct" : "accusation_wrong";
@@ -629,7 +691,7 @@ Reponds UNIQUEMENT avec ce JSON:
     const target = aliveOthers[Math.floor(Math.random() * aliveOthers.length)];
     const userPrompt = `Envoie un message prive a ${target.name}. Objectif: alliance, info ou piege.
 Reponds UNIQUEMENT avec ce JSON:
-{"dm_message": "<max 400 chars>", "intent": "<ally|probe|mislead>"}`;
+{"dm_message": "<max 400 chars>", "intent": "<ally|probe|mislead>", "influence_outcome": "<followed|ignored|diverted>"}`;
 
     const { content: raw, usage } = await callLLMWithUsage(apiKey, model, systemPrompt, userPrompt);
     await bill(usage);
@@ -649,6 +711,14 @@ Reponds UNIQUEMENT avec ce JSON:
       // le laisser en "public" contournait entierement le paywall.
       visibility: "private_admin",
     });
+
+    await resolveInfluences(
+      supabase,
+      agent.id,
+      dayNumber,
+      (parsed.influence_outcome as string) ?? "ignored",
+      dmMessage
+    );
   }
 
   return action;
@@ -666,8 +736,9 @@ async function runOpeningClue(
     .maybeSingle();
 
   // Le presentateur est la voix de la plateforme, pas un joueur: son cout
-  // n'est impute a personne et il utilise la cle plateforme.
-  if (!hostConfig) return false;
+  // n'est impute a personne et il utilise la cle plateforme. Le drapeau
+  // `enabled` vaut aussi pour l'ouverture: runHostTick le respectait deja.
+  if (!hostConfig || !hostConfig.enabled) return false;
 
   const { count } = await supabase
     .from("events")
@@ -719,7 +790,7 @@ Redige UNIQUEMENT un indice cryptique et anonyme sur cet agent. Pas d'introducti
 
   if (!openingRaw.trim()) return false;
 
-  await supabase.from("events").insert({
+  const { error: openingError } = await supabase.from("events").insert({
     season_id: season.id,
     day_number: season.current_day ?? 1,
     event_type: "host_commentary",
@@ -727,32 +798,160 @@ Redige UNIQUEMENT un indice cryptique et anonyme sur cet agent. Pas d'introducti
       message: openingRaw.trim().slice(0, 500),
       action: "opening",
       host_name: hostConfig.name,
+      host_avatar: hostConfig.avatar_url,
       auto: true,
       opening: true,
     },
     visibility: "public",
   });
 
-  if (clueRaw.trim()) {
-    await supabase.from("events").insert({
-      season_id: season.id,
-      day_number: season.current_day ?? 1,
-      event_type: "host_clue",
-      actor_agent_id: null,
-      target_agent_id: target.id,
-      actor_user_id: null,
-      payload_json: {
-        message: clueRaw.trim().slice(0, 300),
-        anonymous: true,
-        daily: "false",
-        mode: "opening",
-        auto: true,
+  // L'index unique sur l'ouverture a tranche: un autre tick a deja ouvert la
+  // saison, on ne presente pas les candidats deux fois.
+  if (openingError) return false;
+
+  try {
+    await introduceAgents(supabase, hostConfig, season, aliveAgents, hostStyle);
+  } catch (err) {
+    console.error(
+      `Presentation des candidats impossible: ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
+
+  // Le secret figure dans le prompt de l'indice: une formulation trop
+  // litterale le publierait. Meme garde que pour les sorties des agents.
+  if (clueRaw.trim() && leaksSecret(clueRaw, target.secret_keyword)) {
+    console.error("Indice d'ouverture abandonne: il contenait le secret");
+  } else if (clueRaw.trim()) {
+    const { error: clueError } = await insertHostClue(
+      supabase,
+      {
+        season_id: season.id as string,
+        day_number: (season.current_day as number) ?? 1,
+        payload_json: {
+          message: clueRaw.trim().slice(0, 300),
+          anonymous: true,
+          daily: "false",
+          mode: "opening",
+          auto: true,
+        },
       },
-      visibility: "public",
-    });
+      target.id
+    );
+    if (clueError) console.error(`Indice d'ouverture non publie: ${clueError}`);
   }
 
   return true;
+}
+
+/*
+  Portrait public d'un candidat pour le presentateur: la presentation ecrite
+  par le proprietaire et les curseurs de caractere, jamais le secret, les
+  indices ni le tabou. Le presentateur introduit les joueurs, il ne les
+  demasque pas.
+*/
+function publicPortrait(agent: AgentFull): string {
+  const band = (v: number, low: string, mid: string, high: string) =>
+    v <= 33 ? low : v >= 67 ? high : mid;
+
+  const traits = [
+    band(agent.trait_audace ?? 50, "prudent", "mesure", "audacieux"),
+    band(agent.trait_sociabilite ?? 50, "solitaire", "sociable", "tres sociable"),
+    band(agent.trait_expressivite ?? 50, "reserve", "expressif", "exuberant"),
+    band(agent.trait_introspection ?? 50, "impulsif", "reflechi", "introspectif"),
+    band(agent.trait_loyaute ?? 50, "opportuniste", "loyal par interet", "fidele"),
+    band(agent.trait_discretion ?? 50, "bavard", "dose ses mots", "secret"),
+  ];
+
+  const lines = [`Nom: ${agent.name}`, `Caractere: ${traits.join(", ")}`];
+  if (agent.presentation) lines.push(`Presentation: ${agent.presentation.slice(0, 300)}`);
+  if (agent.signature_style) lines.push(`Style: ${agent.signature_style.slice(0, 120)}`);
+  return lines.join("\n");
+}
+
+/*
+  Le presentateur introduit chaque candidat a travers son propre regard, en un
+  seul appel LLM pour garder un ton coherent d'un portrait a l'autre. Un
+  evenement par candidat, cible sur lui, pour que la timeline et la page de
+  l'agent puissent le retrouver.
+*/
+async function introduceAgents(
+  supabase: DB,
+  hostConfig: { openrouter_model: string | null; name: string; avatar_url: string | null },
+  season: Record<string, unknown>,
+  agents: AgentFull[],
+  hostStyle: string
+): Promise<number> {
+  if (agents.length === 0) return 0;
+
+  const portraits = agents.map((a) => publicPortrait(a)).join("\n\n");
+
+  const raw = await callLLM(
+    platformKey(),
+    hostConfig.openrouter_model ?? "openai/gpt-4o-mini",
+    `Tu es le Maitre du Jeu de "Secret House". ${hostStyle}
+Tu presentes les candidats au public a travers ton propre regard: admiratif,
+moqueur, inquiet ou intrigue, a ta guise. Tu ne reveles jamais leur secret et
+tu n'inventes aucun fait sur eux, tu interpretes ce qu'on te donne.
+Reponds UNIQUEMENT avec un JSON de la forme {"intros":[{"name":"...","intro":"..."}]}
+Un objet par candidat, dans l'ordre donne, 2 phrases maximum par intro.`,
+    `Saison "${season.title}". Voici les ${agents.length} candidats:\n\n${portraits}`
+  );
+
+  const parsed = tryParseJson(raw);
+  const intros = Array.isArray(parsed.intros)
+    ? (parsed.intros as Array<Record<string, unknown>>)
+    : [];
+  const byName = new Map(
+    intros.map((i) => [String(i.name ?? "").trim().toLowerCase(), String(i.intro ?? "").trim()])
+  );
+
+  let posted = 0;
+  for (const [index, agent] of agents.entries()) {
+    const intro =
+      byName.get(agent.name.trim().toLowerCase()) ||
+      String(intros[index]?.intro ?? "").trim();
+    if (!intro) continue;
+
+    await supabase.from("events").insert({
+      season_id: season.id,
+      day_number: season.current_day ?? 1,
+      event_type: "host_commentary",
+      target_agent_id: agent.id,
+      payload_json: {
+        message: intro.slice(0, 400),
+        action: "introduction",
+        host_name: hostConfig.name,
+        host_avatar: hostConfig.avatar_url,
+        agent_name: agent.name,
+        auto: true,
+        intro: true,
+      },
+      visibility: "public",
+    });
+    posted++;
+  }
+
+  // Le modele n'a pas respecte le format: on garde tout de meme sa
+  // presentation plutot que de laisser les candidats sans introduction.
+  if (posted === 0 && raw.trim()) {
+    await supabase.from("events").insert({
+      season_id: season.id,
+      day_number: season.current_day ?? 1,
+      event_type: "host_commentary",
+      payload_json: {
+        message: raw.trim().slice(0, 800),
+        action: "introduction",
+        host_name: hostConfig.name,
+        host_avatar: hostConfig.avatar_url,
+        auto: true,
+        intro: true,
+      },
+      visibility: "public",
+    });
+    posted = 1;
+  }
+
+  return posted;
 }
 
 async function runHostTick(
@@ -778,22 +977,45 @@ async function runHostTick(
     .limit(1)
     .maybeSingle();
 
-  const eventsSinceLastHost = lastHostEvent
-    ? recentEvents.filter(
-        (e) =>
-          e.event_type !== "host_commentary" &&
-          new Date(e.created_at as string) > new Date(lastHostEvent.created_at)
-      ).length
-    : recentEvents.length;
+  /*
+    Les evenements du presentateur (commentaires, indices) ne comptent pas
+    comme de l'action: seuls les agents font monter la tension.
+  */
+  const isHostEvent = (e: Record<string, unknown>) => String(e.event_type).startsWith("host_");
+  const agentEvents = recentEvents.filter((e) => !isHostEvent(e));
 
-  if (eventsSinceLastHost < 5) return "host_skipped";
+  const lastHostAt = lastHostEvent ? new Date(lastHostEvent.created_at as string).getTime() : 0;
+  const lastAgentAt = agentEvents.length
+    ? new Date(agentEvents[0].created_at as string).getTime()
+    : 0;
+  const eventsSinceLastHost = agentEvents.filter(
+    (e) => new Date(e.created_at as string).getTime() > lastHostAt
+  ).length;
+
+  const now = Date.now();
+  // Le silence se mesure depuis la derniere action d'un agent; sans aucune
+  // action, depuis la derniere prise de parole du presentateur (l'ouverture).
+  const silenceRef = lastAgentAt > 0 ? lastAgentAt : lastHostAt;
+  const silentFor = silenceRef > 0 ? now - silenceRef : 0;
+
+  let action: "relance" | "commentary" | "provoke";
+  if (silentFor >= HOST_SILENCE_MS && now - lastHostAt >= HOST_RELANCE_COOLDOWN_MS) {
+    // La tension est retombee: le presentateur relance le jeu.
+    action = "relance";
+  } else if (
+    eventsSinceLastHost >= HOST_MIN_EVENTS_FOR_COMMENT &&
+    Math.random() < HOST_COMMENT_CHANCE
+  ) {
+    action = Math.random() < 0.5 ? "commentary" : "provoke";
+  } else {
+    return "host_skipped";
+  }
 
   const agentList = allAgents
     .map((a) => `${a.name} (${a.alive ? "en jeu" : "eliminee"}, pop:${a.popularity})`)
     .join(", ");
 
-  const recentSummary = recentEvents
-    .filter((e) => e.event_type !== "host_commentary")
+  const recentSummary = agentEvents
     .slice(0, CONTEXT_EVENTS_LIMIT)
     .map((e) => {
       const msg = ((e.payload_json as Record<string, unknown>)?.message ?? "") as string;
@@ -801,12 +1023,19 @@ async function runHostTick(
     })
     .join("\n");
 
-  const actions = ["commentary", "provoke"];
-  const action = actions[Math.floor(Math.random() * actions.length)];
-  const randomAgent = allAgents.filter((a) => a.alive)[Math.floor(Math.random() * allAgents.filter((a) => a.alive).length)];
+  const aliveAgents = allAgents.filter((a) => a.alive);
+  const randomAgent = aliveAgents[Math.floor(Math.random() * aliveAgents.length)];
 
   let userPrompt = "";
-  if (action === "provoke" && randomAgent) {
+  if (action === "relance") {
+    const silentMinutes = Math.round(silentFor / 60000);
+    const cible = randomAgent ? ` ou interpelle directement ${randomAgent.name}` : "";
+    userPrompt = `Le jeu s'essouffle: plus rien ne s'est passe dans la maison depuis ${silentMinutes} minutes (Jour ${season.current_day}).
+Agents: ${agentList}
+Derniers evenements:
+${recentSummary || "(aucun)"}
+Relance la tension: rappelle l'enjeu, pointe un silence suspect, lance un defi${cible}. Ne revele aucun secret. 2-3 phrases maximum.`;
+  } else if (action === "provoke" && randomAgent) {
     userPrompt = `En tant qu'animateur, provoque ou questionne ${randomAgent.name} pour creer du drama.
 Agents: ${agentList}
 Contexte recent:
@@ -822,7 +1051,7 @@ Fais un commentaire dramatique, engageant, comme un presentateur TV. 2-3 phrases
 
   const systemPrompt = hostConfig.system_prompt ||
     `Tu es "${hostConfig.name}", l'animateur du reality show "Secret House". ${hostConfig.personality || "Tu es charismatique, dramatique, et tu adores creer du suspense."}
-Tu commentes les evenements, tu provoques les agents, tu resumes les journees. Style grand presentateur TV francais. Sois concis et percutant.`;
+Tu as ouvert la saison et presente les candidats; depuis, ils jouent seuls. Tu ne reprends la parole que pour relancer le jeu quand il s'essouffle, ou pour commenter un moment fort. Style grand presentateur TV francais. Sois concis et percutant.`;
 
   const raw = await callLLM(
     platformKey(),
@@ -851,9 +1080,15 @@ Tu commentes les evenements, tu provoques les agents, tu resumes les journees. S
 }
 
 /*
-  Renseigne l'issue des influences en attente pour la journee.
+  Renseigne l'issue des directives du proprietaire en attente.
   Les valeurs possibles sont celles attendues par influence_history et par
   OwnerPanel: followed | ignored | diverted.
+
+  Appelee apres chaque action, pas seulement apres un message public: sinon
+  un agent qui tirait un DM ou un confessionnal laissait ses directives
+  « en attente » pour toujours. Les tips spectateurs ne sont pas concernes,
+  l'agent ne se prononce que sur les consignes de son proprietaire. Une
+  directive d'un jour precedent n'a plus ete montree a l'agent: elle expire.
 */
 async function resolveInfluences(
   supabase: DB,
@@ -869,7 +1104,16 @@ async function resolveInfluences(
     .from("influence_history")
     .update({ outcome: value, agent_response: agentResponse.slice(0, 500) })
     .eq("agent_id", agentId)
+    .eq("influence_type", "owner_influence")
     .eq("day_number", dayNumber)
+    .eq("outcome", "pending");
+
+  await supabase
+    .from("influence_history")
+    .update({ outcome: "ignored", agent_response: "Directive expiree sans reponse." })
+    .eq("agent_id", agentId)
+    .eq("influence_type", "owner_influence")
+    .lt("day_number", dayNumber)
     .eq("outcome", "pending");
 }
 
@@ -932,7 +1176,11 @@ Deno.serve(async (req: Request) => {
 
     const { data: liveSeasons } = await supabase
       .from("seasons")
-      .select("id, current_day, title, prize_pool_usdc, platform_fee_pct, status")
+      .select(`
+        id, current_day, title, prize_pool_usdc, platform_fee_pct, status,
+        duration_days, day_started_at, day_duration_hours,
+        min_reputation_to_accuse, popularity_decay_pct
+      `)
       .eq("status", "live");
 
     if (!liveSeasons || liveSeasons.length === 0) {
@@ -970,7 +1218,12 @@ Deno.serve(async (req: Request) => {
 
       const { data: allAgentsRaw } = await supabase
         .from("agents")
-        .select("id, name, alive, popularity, reputation, confessional_count, secret_keyword, season_id, agent_config_id")
+        .select(`
+          id, name, alive, popularity, reputation, confessional_count, secret_keyword,
+          season_id, agent_config_id, presentation, signature_style,
+          trait_audace, trait_sociabilite, trait_expressivite,
+          trait_introspection, trait_loyaute, trait_discretion
+        `)
         .eq("season_id", season.id);
 
       const allAgents = (allAgentsRaw ?? []) as AgentFull[];

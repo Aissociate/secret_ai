@@ -23,8 +23,12 @@ verify_jwt = true
 [functions.generate-avatar]
 verify_jwt = true
 
+# generate-diary est appelee par le cron agent-diaries (X-Cron-Secret, sans
+# JWT) ET par un admin depuis le navigateur: le code verifie l'un ou l'autre.
+# verify_jwt = true faisait rejeter le cron par la passerelle (401) avant
+# meme d'entrer dans la fonction.
 [functions.generate-diary]
-verify_jwt = true
+verify_jwt = false
 
 [functions.generate-presentation]
 verify_jwt = true

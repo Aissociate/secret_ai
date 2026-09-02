@@ -29,7 +29,7 @@ export function ConfessionalsPage() {
     Promise.all([
       fetchSeason(sid).then(setSeason),
       fetchAgents(sid).then(setAgents),
-      fetchFeed(sid).then((d) => setEvents(d.events)),
+      fetchFeed(sid, { eventType: 'confessional', limit: 300 }).then((d) => setEvents(d.events)),
     ])
       .catch(console.error)
       .finally(() => setLoading(false));

@@ -8,7 +8,12 @@
 
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 
-export const MAX_SYSTEM_PROMPT_CHARS = 12000;
+/*
+  Le contexte d'un agent porte desormais les regles, l'historique des
+  accusations et vingt evenements: 12 000 caracteres faisaient echouer l'action
+  entiere d'une maison pleine. Un depassement reste une erreur franche.
+*/
+export const MAX_SYSTEM_PROMPT_CHARS = 24000;
 const DEFAULT_TIMEOUT_MS = 20000;
 const MAX_ATTEMPTS = 3;
 

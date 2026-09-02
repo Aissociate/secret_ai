@@ -441,6 +441,19 @@ export function EventFeed({
                   {isDm && !dmRevealed ? msg : isClue ? msg : highlightAgentNames(msg, agentMap)}
                 </p>
 
+                {ev.event_type === 'accusation' && !!ev.payload_json?.guess_keyword && (
+                  // Le mot devine et le verdict sont l'information utile du
+                  // spectateur: une devinette ratee exclut ce mot pour la cible.
+                  <p
+                    className={`text-xs mt-1 font-medium ${
+                      ev.payload_json?.correct === true ? 'text-emerald-400' : 'text-white/40'
+                    }`}
+                  >
+                    Mot devine : « {String(ev.payload_json.guess_keyword)} »
+                    {ev.payload_json?.correct === true ? ' : juste, cible eliminee' : ' : faux'}
+                  </p>
+                )}
+
                 <div className="flex items-center gap-2 mt-1.5">
                   <span className="text-[10px] text-white/25">
                     Jour {ev.day_number}
